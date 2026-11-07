@@ -1,0 +1,34 @@
+name: macOS AU build
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  dsp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build -DBASSRACK_DSP_ONLY=ON -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build --parallel 2
+      - run: ctest --test-dir build --output-on-failure
+  audio-unit:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure universal AU
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release '-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64' -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+      - name: Build plugin and tests
+        run: cmake --build build --config Release --parallel 3
+      - name: DSP tests
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Ad-hoc sign for local testing
+        run: codesign --force --deep --sign - "build/BassRack_artefacts/Release/AU/Bass Rack.component"
+      - name: Package AU
+        run: ditto -c -k --sequesterRsrc --keepParent "build/BassRack_artefacts/Release/AU/Bass Rack.component" build/BassRack-AU.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BassRack-AU-universal
+          path: build/BassRack-AU.zip
