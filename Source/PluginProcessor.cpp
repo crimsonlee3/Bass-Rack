@@ -206,8 +206,8 @@ void BassRackProcessor::processChunk(AudioBuffer<float>& buffer) {
             buffer.addSample(0,i,l*level); buffer.addSample(1,i,r*level);
         }
     }
-    *lowEQ.state=*dsp::IIR::ArrayCoefficients<float>::makeLowShelf(sampleRate,120,.707f,bassrack::gain(value("bass")));
-    *highEQ.state=*dsp::IIR::ArrayCoefficients<float>::makeHighShelf(sampleRate,jmin(4000.,sampleRate*.4),.707f,bassrack::gain(value("air")));
+    *lowEQ.state=dsp::IIR::ArrayCoefficients<float>::makeLowShelf(sampleRate,120,.707f,bassrack::gain(value("bass")));
+    *highEQ.state=dsp::IIR::ArrayCoefficients<float>::makeHighShelf(sampleRate,jmin(4000.,sampleRate*.4),.707f,bassrack::gain(value("air")));
     dsp::AudioBlock<float> finalBlock(buffer); dsp::ProcessContextReplacing<float> context(finalBlock);
     lowEQ.process(context); highEQ.process(context);
     compressor.setThreshold(value("threshold")); compressor.setRatio(value("ratio"));
@@ -312,7 +312,7 @@ void BassRackProcessor::getStateInformation(MemoryBlock& dest) {
         if(s.plugin)s.plugin->getStateInformation(s.saved);
         node.setProperty("state",s.saved.toBase64Encoding(),nullptr); graph.appendChild(node,nullptr);
     }
-    root.appendChild(graph,nullptr);
+    root.appendChild(pendingRestore.isValid()?pendingRestore.createCopy():graph,nullptr);
     if(auto xml=root.createXml())copyXmlToBinary(*xml,dest);
 }
 void BassRackProcessor::setStateInformation(const void* data,int size) {
