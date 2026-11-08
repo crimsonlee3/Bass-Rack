@@ -4,6 +4,8 @@
 
 static void capture(BassRackProcessor& processor,const juce::File& output,bool master) {
     processor.prepareToPlay(48000,512);
+    std::array<float,1024> discarded{};
+    while(processor.readAnalyzer(discarded.data(),static_cast<int>(discarded.size()))>0){}
     // A deterministic bass test tone drives the real analyzer for these previews.
     juce::AudioBuffer<float> signal(2,512);juce::MidiBuffer midi;
     for(int block=0;block<64;++block) {
@@ -35,6 +37,11 @@ static void capture(BassRackProcessor& processor,const juce::File& output,bool m
 
 static void require(bool ok,const char* message){if(!ok)throw std::runtime_error(message);}
 static void runEngineChecks(BassRackProcessor& processor) {
+    auto* format=processor.formats.getFormat(0);
+    const auto candidates=format->searchPathsForPlugins({},false,true);
+    require(!candidates.isEmpty(),"No registered effects found");
+    for(const auto& id:candidates)require(bassrack::effectAUIdentifier(id.toStdString()),"Scanner enumerated a non-effect AU");
+    std::cout<<"Effects-only enumeration: "<<candidates.size()<<" candidates; no instruments/generators\n";
     constexpr int total=32768;
     juce::MidiBuffer midi;
     for(int mode=0;mode<=4;++mode) {
@@ -88,5 +95,14 @@ int main(int argc,char** argv) {
 
     capture(processor,folder.getChildFile("bass-rack-five-bands.png"),false);
     capture(processor,folder.getChildFile("bass-rack-master.png"),true);
+    processor.showScanner();
+    for(int i=0;i<juce::Desktop::getInstance().getNumComponents();++i) {
+        auto* window=dynamic_cast<juce::DocumentWindow*>(juce::Desktop::getInstance().getComponent(i));
+        if(window&&window->getName().contains("Effects-only")) {
+            auto image=window->createComponentSnapshot(window->getLocalBounds(),true,1.5f);
+            juce::FileOutputStream stream(folder.getChildFile("bass-rack-effects-scan.png"));stream.setPosition(0);stream.truncate();
+            juce::PNGImageFormat png;require(png.writeImageToStream(image,stream),"Scanner PNG capture failed");
+        }
+    }
     return 0;
 }

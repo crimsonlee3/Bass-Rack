@@ -6,7 +6,7 @@ const std::array<Colour,5> colours{Colour(0xffe4c369),Colour(0xff77cfc0),Colour(
 String bandKey(int b,const char* suffix){return "b"+String(b)+"_"+suffix;}
 Font font(float size,bool bold=false){return Font(FontOptions(size,bold?Font::bold:Font::plain));}
 void labelStyle(Label& l,float size,Colour colour){l.setFont(font(size));l.setColour(Label::textColourId,colour);}
-String frequency(float hz){return hz>=1000?String(hz/1000,hz<10000?1:0)+"k":String(hz,0);}
+String frequency(float hz){return hz>=1000?String(hz/1000,hz<10000?1:0)+"k":String(roundToInt(hz));}
 }
 void BassRackEditor::RackLook::drawButtonBackground(Graphics& g,Button& button,const Colour&,bool hover,bool down) {
     auto r=button.getLocalBounds().toFloat().reduced(.5f);
@@ -419,7 +419,13 @@ void BassRackEditor::BandMap::paint(Graphics& g) {
 void BassRackEditor::BandMap::mouseDown(const MouseEvent& e) {
     for(int band=0;band<5;++band)if(editor.processor.bandActive(band)&&e.position.getDistanceFrom(node(band))<16) {
         editor.select(band);
-        if(e.mods.isPopupMenu()){editor.changeCount(-1);return;}
+        if(e.mods.isPopupMenu()){
+            PopupMenu menu;menu.addItem(1,"Delete region and its inserts");
+            Component::SafePointer<BassRackEditor> safe(&editor);
+            menu.showMenuAsync(PopupMenu::Options().withTargetComponent(this),[safe,band](int result){
+                if(safe&&result==1){safe->select(band);safe->changeCount(-1);}
+            });return;
+        }
         gainBand=band;dragY=e.position.y;dragGain=editor.processor.value(bandKey(band,"level"));
         for(auto* id:{"level","freq"})editor.processor.state.getParameter(bandKey(band,id))->beginChangeGesture();
         return;
