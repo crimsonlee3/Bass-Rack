@@ -53,6 +53,7 @@ BassRackProcessor::BassRackProcessor()
     formats.addDefaultFormats();
     knownFile=File::getSpecialLocation(File::userApplicationDataDirectory)
         .getChildFile("BassRack").getChildFile("known-plugins.xml");
+    knownFile.getParentDirectory().createDirectory();
     if(auto xml=XmlDocument::parse(knownFile)) known.recreateFromXml(*xml);
 }
 BassRackProcessor::~BassRackProcessor() {
@@ -61,7 +62,8 @@ BassRackProcessor::~BassRackProcessor() {
     if(auto xml=known.createXml()) {knownFile.getParentDirectory().createDirectory(); xml->writeTo(knownFile);}
 }
 bool BassRackProcessor::isBusesLayoutSupported(const BusesLayout& layout) const {
-    return layout.getMainInputChannelSet()==AudioChannelSet::stereo()
+    return (layout.getMainInputChannelSet()==AudioChannelSet::stereo()
+        || layout.getMainInputChannelSet()==AudioChannelSet::mono())
         && layout.getMainOutputChannelSet()==AudioChannelSet::stereo();
 }
 float BassRackProcessor::value(const String& id) const {return state.getRawParameterValue(id)->load();}
@@ -104,6 +106,7 @@ void BassRackProcessor::prepareToPlay(double sr,int block) {
     for(auto& rack:chains) for(auto& s:rack)
         if(s.plugin) {s.plugin->setRateAndBufferSizeDetails(sr,blockSize); s.plugin->prepareToPlay(sr,blockSize);}
     updateLatency();
+    setLatencySamples(desiredLatency.load());
 }
 void BassRackProcessor::releaseResources() {
     const ScopedLock lock(graphLock); prepared=false;
@@ -142,6 +145,8 @@ void BassRackProcessor::processBlock(AudioBuffer<float>& buffer,MidiBuffer& midi
     ScopedNoDenormals noDenormals;
     midi.clear();
     if(!lock.isLocked() || !prepared || buffer.getNumChannels()!=2) {buffer.clear();return;}
+    if(getTotalNumInputChannels()==1)
+        buffer.copyFrom(1,0,buffer,0,0,buffer.getNumSamples());
     // Hosts can supply a block larger than the advertised maximum.
     for(int start=0;start<buffer.getNumSamples();start+=blockSize) {
         const int size=jmin(blockSize,buffer.getNumSamples()-start);
@@ -192,12 +197,11 @@ void BassRackProcessor::processChunk(AudioBuffer<float>& buffer) {
             }
         }
         oversampling[b]->processSamplesDown(block);
-        // Bypass retains inserts and their delay but asks each insert to bypass.
-        if(bypass) {
-            MidiBuffer empty;
-            for(auto& s:chains[b]) if(s.plugin)s.plugin->processBlockBypassed(band,empty);
-        } else processRack(b,band);
-        alignment[b].process(channels[0],channels[1],size,maxLatency-rackLatency(b));
+        // Skip the chain on bypass and supply its latency ourselves. Hosted
+        // processBlockBypassed implementations do not universally preserve delay.
+        if(!bypass)processRack(b,band);
+        alignment[b].process(channels[0],channels[1],size,
+            bypass?maxLatency:maxLatency-rackLatency(b));
         const bool audible=value(key(b,"mute"))<.5f && (!anySolo || value(key(b,"solo"))>.5f);
         for(int i=0;i<size;++i) {
             float l=channels[0][i],r=channels[1][i];

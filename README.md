@@ -17,8 +17,8 @@ been performed in this environment.
 ## Workflow
 
 1. Insert **Audio Units → Crimson Audio → Bass Rack** on a stereo channel.
-   A mono 808 can feed a stereo bus/channel before the insert; the first version
-   exposes a stereo input and stereo output only.
+   Stereo and mono-to-stereo input configurations are supported, so a mono 808
+   can use the per-band stereo rack without an extra routing bus.
 2. Select **808 - clean sub** for a starting point. It keeps the lowest band
    clean and mono while adding parallel harmonics above 90 Hz.
 3. Drag crossover handles. Double-click the map to add a crossover, up to five
@@ -101,7 +101,7 @@ sample rates, distortion bounds, stereo identity/mono, and latency delay impulse
   solo/mute fades and anti-click insert swaps remain future work.
 - Inserts are before per-band stereo imaging; arbitrary module ordering is not
   implemented. Replacing/removing an insert closes all floating plugin/scanner
-  windows; stock band bypass retains plugin latency via hosted bypass.
+  windows; band bypass skips the AU chain and inserts an equivalent delay.
 - A band-chain latency must stay below 262144 samples. Excessive latency mutes
   output with a status message rather than silently misaligning bands.
 - Adding a crossover sorts frequency boundaries; chains remain assigned by band

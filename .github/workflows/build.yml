@@ -26,6 +26,11 @@ jobs:
         run: ctest --test-dir build -C Release --output-on-failure
       - name: Ad-hoc sign for local testing
         run: codesign --force --deep --sign - "build/BassRack_artefacts/Release/AU/Bass Rack.component"
+      - name: Validate Audio Unit
+        run: |
+          mkdir -p "$HOME/Library/Audio/Plug-Ins/Components"
+          ditto "build/BassRack_artefacts/Release/AU/Bass Rack.component" "$HOME/Library/Audio/Plug-Ins/Components/Bass Rack.component"
+          auval -v aufx BsRk Crsn
       - name: Package AU
         run: ditto -c -k --sequesterRsrc --keepParent "build/BassRack_artefacts/Release/AU/Bass Rack.component" build/BassRack-AU.zip
       - uses: actions/upload-artifact@v4
