@@ -18,18 +18,30 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/cache/restore@v4
+        with:
+          path: build
+          key: bassrack-macos-universal-juce806-${{ runner.arch }}-${{ hashFiles('CMakeLists.txt') }}
       - name: Configure universal AU
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release '-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64' -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
       - name: Build plugin and tests
         run: cmake --build build --config Release --parallel 3
       - name: DSP tests
         run: ctest --test-dir build -C Release --output-on-failure
+      - uses: actions/cache/save@v4
+        with:
+          path: build
+          key: bassrack-macos-universal-juce806-${{ runner.arch }}-${{ hashFiles('CMakeLists.txt') }}
       - name: Ad-hoc sign for local testing
         run: codesign --force --deep --sign - "build/BassRack_artefacts/Release/AU/Bass Rack.component"
       - name: Validate Audio Unit
         run: |
           mkdir -p "$HOME/Library/Audio/Plug-Ins/Components"
           ditto "build/BassRack_artefacts/Release/AU/Bass Rack.component" "$HOME/Library/Audio/Plug-Ins/Components/Bass Rack.component"
+          /usr/libexec/PlistBuddy -c 'Print :AudioComponents' "$HOME/Library/Audio/Plug-Ins/Components/Bass Rack.component/Contents/Info.plist"
+          killall -9 AudioComponentRegistrar || true
+          sleep 3
+          auval -a
           auval -v aufx BsRk Crsn
       - name: Package AU
         run: ditto -c -k --sequesterRsrc --keepParent "build/BassRack_artefacts/Release/AU/Bass Rack.component" build/BassRack-AU.zip
