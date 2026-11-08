@@ -317,7 +317,7 @@ double BassRackProcessor::getTailLengthSeconds() const {
         maximum=jmax(maximum,tail);
     }
     for(const auto& s:chains[master])if(s.plugin)maximum+=s.plugin->getTailLengthSeconds();
-    return maximum;
+    return maximum+2.0*regionDelay/sampleRate;
 }
 void BassRackProcessor::closePluginWindows() {windows.clear();}
 void BassRackProcessor::loadPlugin(int rack,int slot,const PluginDescription& description,MemoryBlock initial) {

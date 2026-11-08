@@ -78,7 +78,30 @@ static void runEngineChecks(BassRackProcessor& processor) {
         std::cout<<"Region "<<tone<<" Hz: "<<db<<" dB\n";
         processor.releaseResources();
     }
-    processor.factoryPreset(0);
+    processor.factoryPreset(0);processor.setParam("oversampling",0);
+    processor.setParam("b0_freq",1000);processor.setParam("b0_q",2);
+    processor.setParam("b0_level",6);processor.setParam("autogain",1);
+    processor.prepareToPlay(48000,512);
+    require(processor.getTailLengthSeconds()>=8192.0/48000,"FIR tail not reported");
+    int sample=0;
+    auto measure=[&](int blocks) {
+        double energy=0;int count=0;
+        for(int block=0;block<blocks;++block) {
+            juce::AudioBuffer<float> audio(2,512);
+            for(int i=0;i<512;++i){float x=static_cast<float>(.1*std::sin((sample++)*2*bassrack::pi*1000/48000));audio.setSample(0,i,x);audio.setSample(1,i,x);}
+            processor.processBlock(audio,midi);
+            if(block>=blocks-80)for(int i=0;i<512;++i){energy+=audio.getSample(0,i)*audio.getSample(0,i);++count;}
+        }
+        return 10*std::log10(energy/count/.005);
+    };
+    const double matched=measure(700);
+    require(std::abs(matched)<.12,"Engine Auto Gain did not match input RMS");
+    std::cout<<"Native Auto Gain: "<<matched<<" dB / correction "<<processor.autoGainDb()<<" dB\n";
+    processor.setParam("output",-3);
+    const double trimmed=measure(200);
+    require(std::abs(trimmed+3)<.12,"Auto Gain fought manual output trim");
+    std::cout<<"Manual trim with Auto Gain: "<<trimmed<<" dB\n";
+    processor.releaseResources();processor.factoryPreset(0);
 }
 
 int main(int argc,char** argv) {
