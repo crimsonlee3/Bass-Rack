@@ -9,10 +9,23 @@ of iZotope Trash. No iZotope code, artwork, presets or binary internals are used
 
 ## Status
 
-Early development / 0.1.0. Not a production release. See the pull request and
+Early development / 0.2.0. Not a production release. See the pull request and
 Actions checks for the actual build result. A successful compile does not verify
 Logic compatibility or every third-party AU. No listening test in Logic has
 been performed in this environment.
+
+## Interface / 0.2.0
+
+The interface uses a larger frequency display, colored response curves and
+draggable level nodes, with a live input spectrum and input/output peak readouts.
+A selected-band inspector combines a transfer-curve preview, stock distortion
+controls and three AU slots. The master inspector provides EQ and compression.
+This is an original visual design; no FabFilter or iZotope assets are used.
+
+The spectrum reads an SPSC sample FIFO; audio processing never waits for the
+display. The plot's colored curves show crossover magnitude plus band level,
+before nonlinear distortion and third-party inserts; they are not an output EQ
+measurement. Native previews use a deterministic 55/110/220 Hz bass test tone.
 
 ## Workflow
 
@@ -46,8 +59,9 @@ master bass and treble EQ → optional compressor → three master AU effects �
 output trim.
 
 Crossover slopes are 24 dB/octave. All-pass compensation on earlier bands keeps
-the neutral summed magnitude flat. The band map is a frequency-range editor,
-not a live spectrum analyzer. The plugin reports oversampling and insert latency
+the neutral summed magnitude flat. The frequency display combines phase-compensated band response curves with a
+live input FFT spectrum. Drag numbered nodes vertically to adjust band levels;
+drag crossover boundaries to change the frequency ranges. The plugin reports oversampling and insert latency
 to Logic. Parallel band chains are aligned to the longest active chain.
 
 ## macOS build

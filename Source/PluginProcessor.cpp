@@ -147,12 +147,36 @@ void BassRackProcessor::processBlock(AudioBuffer<float>& buffer,MidiBuffer& midi
     if(!lock.isLocked() || !prepared || buffer.getNumChannels()!=2) {buffer.clear();return;}
     if(getTotalNumInputChannels()==1)
         buffer.copyFrom(1,0,buffer,0,0,buffer.getNumSamples());
+    const float meterFall=buffer.getNumSamples()*36.f/static_cast<float>(sampleRate);
+    float inputMaximum=0;
+    for(int i=0;i<buffer.getNumSamples();++i)
+        inputMaximum=jmax(inputMaximum,std::abs(buffer.getSample(0,i)),std::abs(buffer.getSample(1,i)));
+    inputMeter.store(jmax(Decibels::gainToDecibels(inputMaximum,-100.f),inputMeter.load()-meterFall));
+    int start1,size1,start2,size2;
+    analyzerFifo.prepareToWrite(buffer.getNumSamples(),start1,size1,start2,size2);
+    for(int i=0;i<size1;++i)analyzerSamples[static_cast<size_t>(start1+i)]=
+        (buffer.getSample(0,i)+buffer.getSample(1,i))*.5f;
+    for(int i=0;i<size2;++i)analyzerSamples[static_cast<size_t>(start2+i)]=
+        (buffer.getSample(0,size1+i)+buffer.getSample(1,size1+i))*.5f;
+    analyzerFifo.finishedWrite(size1+size2);
     // Hosts can supply a block larger than the advertised maximum.
     for(int start=0;start<buffer.getNumSamples();start+=blockSize) {
         const int size=jmin(blockSize,buffer.getNumSamples()-start);
         float* channels[]{buffer.getWritePointer(0,start),buffer.getWritePointer(1,start)};
         AudioBuffer<float> chunk(channels,2,size); processChunk(chunk);
     }
+    float outputMaximum=0;
+    for(int i=0;i<buffer.getNumSamples();++i)
+        outputMaximum=jmax(outputMaximum,std::abs(buffer.getSample(0,i)),std::abs(buffer.getSample(1,i)));
+    outputMeter.store(jmax(Decibels::gainToDecibels(outputMaximum,-100.f),outputMeter.load()-meterFall));
+}
+int BassRackProcessor::readAnalyzer(float* destination,int maximum) {
+    int start1,size1,start2,size2;
+    analyzerFifo.prepareToRead(maximum,start1,size1,start2,size2);
+    std::copy_n(analyzerSamples.data()+start1,size1,destination);
+    std::copy_n(analyzerSamples.data()+start2,size2,destination+size1);
+    analyzerFifo.finishedRead(size1+size2);
+    return size1+size2;
 }
 void BassRackProcessor::processChunk(AudioBuffer<float>& buffer) {
     const int count=jlimit(1,5,static_cast<int>(value("bands")));

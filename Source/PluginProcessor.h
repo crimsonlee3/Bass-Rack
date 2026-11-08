@@ -39,6 +39,9 @@ public:
     float value(const juce::String& id) const;
     std::array<float,4> crossovers() const;
     juce::String status() const;
+    int readAnalyzer(float* destination,int maximum);
+    float inputPeak() const {return inputMeter.load();}
+    float outputPeak() const {return outputMeter.load();}
     void savePreset(const juce::File&);
     void loadPreset(const juce::File&);
 private:
@@ -56,6 +59,10 @@ private:
     juce::OwnedArray<juce::DocumentWindow> windows;
     juce::String message="Ready";
     juce::File knownFile;
+    // One audio-thread producer and one editor-thread consumer; no audio locks or allocations.
+    juce::AbstractFifo analyzerFifo{8192};
+    std::array<float,8192> analyzerSamples{};
+    std::atomic<float> inputMeter{-100.f},outputMeter{-100.f};
     bassrack::Splitter splitter[2];
     std::array<juce::AudioBuffer<float>,bands> audio;
     std::array<std::unique_ptr<juce::dsp::Oversampling<float>>,bands> oversampling;
