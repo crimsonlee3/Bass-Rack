@@ -3,6 +3,7 @@
 #include <array>
 #include <cmath>
 #include <vector>
+#include <string>
 
 namespace bassrack {
 constexpr int maxBands = 5;
@@ -118,4 +119,41 @@ public:
         }
     }
 };
+}
+
+namespace bassrack {
+inline double regionMagnitude(double hz,double centre,double q,int order) {
+    if(hz<=0)return 0;
+    const double shape=std::abs((hz/centre-centre/hz)*q);
+    return 1/std::sqrt(1+std::pow(shape,2*order));
+}
+inline std::array<double,2> regionEdges(double centre,double q) {
+    const double width=1/q,k=std::sqrt(4+width*width);
+    return {centre*(k-width)*.5,centre*(k+width)*.5};
+}
+class AutoLevel {
+    double input=0,output=0,correction=1,energyRate=.00005,gainRate=.0002;
+public:
+    void prepare(double sr) {
+        energyRate=1-std::exp(-1/(sr*.4));gainRate=1-std::exp(-1/(sr*.1));reset();
+    }
+    void reset(){input=output=0;correction=1;}
+    float process(float inputPower,float outputPower,bool enabled) {
+        input+=energyRate*(inputPower-input);output+=energyRate*(outputPower-output);
+        double target=1;
+        if(enabled) {
+            target=correction;
+            if(input>1.e-8 && output>1.e-12)target=std::clamp(std::sqrt(input/output),.25,4.);
+        }
+        correction+=gainRate*(target-correction);
+        return static_cast<float>(correction);
+    }
+    float db()const{return static_cast<float>(20*std::log10(correction));}
+};
+inline bool effectAUIdentifier(const std::string& identifier) {
+    if(identifier.rfind("AudioUnit:",0)!=0)return false;
+    const auto pos=identifier.find_last_of(":/");
+    const auto code=identifier.substr(pos+1,4);
+    return (code=="aufx"||code=="aumf") && identifier.size()>pos+5 && identifier[pos+5]==',';
+}
 }

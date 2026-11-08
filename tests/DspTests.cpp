@@ -36,5 +36,22 @@ int main() {
     require(dl[0]==0 && dl[3]==1 && dr[3]==1,"latency alignment impulse");
     delay.reset(); float zl[8]{},zr[8]{}; delay.process(zl,zr,8,0);
     require(zl[0]==0,"delay reset");
+    for(double fc:{40.,100.,1000.,8000.})for(double q:{.2,1.,4.,16.})for(int order:{2,4,8,16}) {
+        require(std::abs(regionMagnitude(fc,fc,q,order)-1)<1e-12,"region centre");
+        const auto edges=regionEdges(fc,q);
+        require(std::abs(regionMagnitude(edges[0],fc,q,order)-std::sqrt(.5))<1e-9,"Q lower edge");
+        require(std::abs(regionMagnitude(edges[1],fc,q,order)-std::sqrt(.5))<1e-9,"Q upper edge");
+    }
+    require(regionMagnitude(400,100,1,16)<regionMagnitude(400,100,1,2),"steeper slope isolation");
+    for(auto id:{"AudioUnit:Synths/aumu,samp,appl","AudioUnit:Generators/augn,genr,appl",
+        "AudioUnit:MidiEffects/aumi,arpe,abcd","not-an-au/aufx,test,abcd"})
+        require(!effectAUIdentifier(id),"instrument/generator scan exclusion");
+    for(auto id:{"AudioUnit:Effects/aufx,dist,abcd","AudioUnit:Effects/aumf,fx01,abcd"})
+        require(effectAUIdentifier(id),"audio effect scan inclusion");
+    AutoLevel ag;ag.prepare(48000);
+    float correction=1;
+    for(int i=0;i<48000*8;++i){float v=.2f*std::sin(static_cast<float>(2*pi*100*i/48000));correction=ag.process(v*v,4*v*v,true);}
+    require(std::abs(correction-.5f)<.005,"automatic level matching");
+    ag.reset();for(int i=0;i<10000;++i)require(ag.process(0,0,true)==1,"silent auto gain stability");
     std::cout<<"DSP tests passed\n";
 }

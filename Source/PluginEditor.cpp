@@ -106,7 +106,10 @@ BassRackEditor::BassRackEditor(BassRackProcessor& p):AudioProcessorEditor(p),pro
         auto& button=bandButtons[static_cast<size_t>(b)];
         button.setButtonText("0"+String(b+1));
         button.setColour(TextButton::textColourOnId,colours[static_cast<size_t>(b)]);
-        button.onClick=[this,b]{if(b<static_cast<int>(processor.value("bands")))select(b);};
+        button.onClick=[this,b]{
+            if(!processor.bandActive(b)){processor.setParam(bandKey(b,"freq"),55.f*std::pow(3.f,static_cast<float>(b)));processor.setParam(bandKey(b,"active"),1);}
+            select(b);
+        };
         addAndMakeVisible(button);
     }
     for(auto* button:{&masterButton,&addButton,&removeButton,&scanButton,&saveButton,&loadButton})addAndMakeVisible(*button);
@@ -135,12 +138,24 @@ BassRackEditor::BassRackEditor(BassRackProcessor& p):AudioProcessorEditor(p),pro
         chooser->launchAsync(FileBrowserComponent::openMode|FileBrowserComponent::canSelectFiles,
             [safe](const FileChooser& c){if(safe && c.getResult()!=File{})safe->processor.loadPreset(c.getResult());});
     };
-    setSize(1180,820);setResizable(true,true);setResizeLimits(1000,780,1600,1100);
+    for(auto* control:{&frequencyControl,&qControl}) {
+        control->setSliderStyle(Slider::LinearHorizontal);control->setTextBoxStyle(Slider::TextBoxRight,false,86,24);
+        control->setColour(Slider::textBoxOutlineColourId,edge);addAndMakeVisible(*control);
+    }
+    slope.addItemList(StringArray{"12 dB/oct","24 dB/oct","48 dB/oct","96 dB/oct"},1);addAndMakeVisible(slope);
+    oversamplingChoice.addItemList(StringArray{"Off / 1x","2x","4x","8x","16x"},1);addAndMakeVisible(oversamplingChoice);
+    osAttachment=std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment>(processor.state,"oversampling",oversamplingChoice);
+    addAndMakeVisible(autoGain);autoAttachment=std::make_unique<AudioProcessorValueTreeState::ButtonAttachment>(processor.state,"autogain",autoGain);
+    autoGain.setTooltip("Match processed level to input before output trim. Range +/-12 dB; paused during solo.");
+    addAndMakeVisible(deleteButton);deleteButton.onClick=[this]{changeCount(-1);};
+    setSize(1180,880);setResizable(true,true);setResizeLimits(1000,820,1600,1100);
     select(0);startTimerHz(30);
 }
 BassRackEditor::~BassRackEditor(){stopTimer();setLookAndFeel(nullptr);}
 void BassRackEditor::select(int band) {
     selected=band;const bool master=selected==BassRackProcessor::master;
+    frequencyAttachment.reset();qAttachment.reset();slopeAttachment.reset();
+    frequencyControl.setVisible(!master);qControl.setVisible(!master);slope.setVisible(!master);deleteButton.setVisible(!master);
     typeAttachment.reset();muteAttachment.reset();soloAttachment.reset();bypassAttachment.reset();compressAttachment.reset();
     type.setVisible(!master);transfer.setVisible(!master);
     mute.setVisible(!master);solo.setVisible(!master);bypass.setVisible(!master);compress.setVisible(master);
@@ -157,6 +172,14 @@ void BassRackEditor::select(int band) {
         const char* names[]{"DRIVE","DISTORTION MIX","BAND LEVEL","STEREO WIDTH","PAN"};
         for(int i=0;i<5;++i)knobs[static_cast<size_t>(i)].bind(processor,bandKey(selected,ids[i]),names[i]);
         knobs[5].setVisible(false);knobs[6].setVisible(false);
+        frequencyAttachment=std::make_unique<AudioProcessorValueTreeState::SliderAttachment>(processor.state,bandKey(band,"freq"),frequencyControl);
+        qAttachment=std::make_unique<AudioProcessorValueTreeState::SliderAttachment>(processor.state,bandKey(band,"q"),qControl);
+        frequencyControl.textFromValueFunction=[](double v){return String(v,1)+" Hz";};
+        frequencyControl.valueFromTextFunction=[](const String& v){return v.getDoubleValue();};
+        qControl.textFromValueFunction=[](double v){return String(v,2);};
+        qControl.valueFromTextFunction=[](const String& v){return v.getDoubleValue();};
+        frequencyControl.setNumDecimalPlacesToDisplay(1);qControl.setNumDecimalPlacesToDisplay(2);
+        slopeAttachment=std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment>(processor.state,bandKey(band,"slope"),slope);
         typeAttachment=std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment>(processor.state,bandKey(band,"type"),type);
         muteAttachment=std::make_unique<AudioProcessorValueTreeState::ButtonAttachment>(processor.state,bandKey(band,"mute"),mute);
         soloAttachment=std::make_unique<AudioProcessorValueTreeState::ButtonAttachment>(processor.state,bandKey(band,"solo"),solo);
@@ -168,18 +191,14 @@ void BassRackEditor::select(int band) {
     timerCallback();resized();repaint();
 }
 void BassRackEditor::changeCount(int delta) {
-    const int count=jlimit(1,5,static_cast<int>(processor.value("bands"))+delta);
-    processor.setParam("bands",static_cast<float>(count));
-    if(selected<count || selected==BassRackProcessor::master)timerCallback();else select(count-1);
+    if(delta>0){addAt(1000);return;}
+    if(selected!=BassRackProcessor::master)processor.deleteRegion(selected);
+    for(int b=0;b<5;++b)if(processor.bandActive(b)){select(b);return;}
+    select(BassRackProcessor::master);
 }
 void BassRackEditor::addAt(float hz) {
-    const int count=static_cast<int>(processor.value("bands"));
-    if(count>=5)return;
-    auto xs=processor.crossovers();std::vector<float> edges;
-    for(int i=0;i<count-1;++i)edges.push_back(xs[i]);
-    edges.push_back(jlimit(25.f,19000.f,hz));std::sort(edges.begin(),edges.end());
-    for(int i=0;i<count;++i)processor.setParam("x"+String(i),edges[static_cast<size_t>(i)]);
-    processor.setParam("bands",static_cast<float>(count+1));timerCallback();
+    const int region=processor.addRegion(jlimit(20.f,20000.f,hz));
+    if(region>=0)select(region);
 }
 void BassRackEditor::insertMenu(int slot) {
     PopupMenu menu;
@@ -187,7 +206,7 @@ void BassRackEditor::insertMenu(int slot) {
     const auto types=processor.known.getTypes();
     PopupMenu effects;
     for(int i=0;i<types.size();++i)
-        if(!types[i].isInstrument && types[i].name!="Bass Rack")
+        if(BassRackProcessor::effectEligible(types[i]))
             effects.addItem(100+i,types[i].manufacturerName+" / "+types[i].name);
     if(types.isEmpty())menu.addItem(3,"Scan Audio Units...");
     else menu.addSubMenu("Load / replace AU effect",effects);
@@ -204,61 +223,64 @@ void BassRackEditor::insertMenu(int slot) {
         });
 }
 void BassRackEditor::timerCallback() {
-    const int count=static_cast<int>(processor.value("bands"));
-    if(selected>=count && selected!=BassRackProcessor::master){select(count-1);return;}
-    const auto edges=processor.crossovers();
+    if(selected!=BassRackProcessor::master&&!processor.bandActive(selected)){select(BassRackProcessor::master);return;}
     if(selected==BassRackProcessor::master)selectionTitle.setText("MASTER / FINISH",dontSendNotification);
-    else {
-        const float low=selected==0?20:edges[static_cast<size_t>(selected-1)];
-        const float high=selected==count-1?20000:edges[static_cast<size_t>(selected)];
-        selectionTitle.setText("BAND 0"+String(selected+1)+"   /   "+frequency(low)+" - "+frequency(high)+" Hz",dontSendNotification);
-    }
+    else selectionTitle.setText("REGION 0"+String(selected+1)+" / "+frequency(processor.value(bandKey(selected,"freq")))+" Hz",dontSendNotification);
     selectionTitle.setColour(Label::textColourId,selectedColour());
-    for(int b=0;b<5;++b)bandButtons[static_cast<size_t>(b)].setEnabled(b<count);
-    addButton.setEnabled(count<5);removeButton.setEnabled(count>1);
-    for(int i=0;i<3;++i)inserts[static_cast<size_t>(i)].setButtonText("0"+String(i+1)+"   /   "+processor.slotName(selected,i));
-    statusLabel.setText(processor.status()+"   /   "+String(processor.getLatencySamples())+" samples latency",dontSendNotification);
+    int active=0;
+    for(int b=0;b<5;++b) {
+        const bool enabled=processor.bandActive(b);active+=enabled?1:0;
+        bandButtons[static_cast<size_t>(b)].setButtonText(enabled?"0"+String(b+1):"+");
+    }
+    addButton.setEnabled(active<5);removeButton.setEnabled(selected!=BassRackProcessor::master);
+    for(int i=0;i<3;++i)inserts[static_cast<size_t>(i)].setButtonText("0"+String(i+1)+" / "+processor.slotName(selected,i));
+    statusLabel.setText(processor.status()+" / "+String(processor.getLatencySamples())+" samples / AUTO "+String(processor.autoGainDb(),1)+" dB",dontSendNotification);
     map.updateSpectrum();map.repaint();transfer.repaint();
 }
 void BassRackEditor::paint(Graphics& g) {
-    g.fillAll(background);
-    g.setColour(Colour(0xff292e31));g.drawHorizontalLine(77,0,static_cast<float>(getWidth()));
-    const float controls=static_cast<float>(getHeight()-372);
-    g.setGradientFill(ColourGradient(Colour(0xff202427),0,controls,panel,0,controls+218,false));
-    g.fillRoundedRectangle(24,controls,getWidth()-48.f,218,8);
-    g.setColour(edge);g.drawRoundedRectangle(24.5f,controls+.5f,getWidth()-49.f,217,8,.8f);
+    g.fillAll(background);g.setColour(Colour(0xff292e31));g.drawHorizontalLine(77,0,static_cast<float>(getWidth()));
+    const float controls=static_cast<float>(getHeight()-426);
+    g.setGradientFill(ColourGradient(Colour(0xff202427),0,controls,panel,0,controls+272,false));
+    g.fillRoundedRectangle(24,controls,getWidth()-48.f,272,8);
+    g.setColour(edge);g.drawRoundedRectangle(24.5f,controls+.5f,getWidth()-49.f,271,8,.8f);
     if(selected!=BassRackProcessor::master) {
-        g.setColour(edge);g.drawVerticalLine(244,controls+18,controls+200);
+        g.setColour(edge);g.drawVerticalLine(244,controls+18,controls+252);
         g.setColour(muted);g.setFont(font(10,true));g.drawText("SHAPER",42,static_cast<int>(controls+12),160,20,Justification::centredLeft);
+        g.drawText("FREQUENCY",260,static_cast<int>(controls+40),150,16,Justification::centredLeft);
+        g.drawText("Q / BANDWIDTH",static_cast<int>(260+jmin(216.f,(getWidth()-500)*.28f)+18),static_cast<int>(controls+40),150,16,Justification::centredLeft);
+        g.drawText("SLOPE",static_cast<int>(260+jmin(216.f,(getWidth()-500)*.28f)+186),static_cast<int>(controls+40),120,16,Justification::centredLeft);
     }
-    g.setColour(panel);g.fillRoundedRectangle(24,controls+232,getWidth()-48.f,88,8);
-    g.setColour(edge);g.drawRoundedRectangle(24.5f,controls+232.5f,getWidth()-49.f,87,8,.8f);
+    g.setColour(panel);g.fillRoundedRectangle(24,controls+286,getWidth()-48.f,88,8);
+    g.setColour(edge);g.drawRoundedRectangle(24.5f,controls+286.5f,getWidth()-49.f,87,8,.8f);
     g.setColour(muted);g.setFont(font(10.5f));
-    g.drawText("Drag a crossover to split. Drag a numbered node to set band level. Double-click to add a band.",
+    g.drawText("Double-click to create a region. Drag nodes for frequency/level. Scroll over a node for Q. Drag its edges for width.",
         28,static_cast<int>(controls-28),getWidth()-56,20,Justification::centredLeft);
     g.setColour(Colour(0xff687276));g.setFont(font(9.5f,true));
-    g.drawText("2x OVERSAMPLING    /    AU HOST    /    0.2.0",getWidth()-390,getHeight()-35,362,18,Justification::centredRight);
+    g.drawText("LINEAR PHASE / INDEPENDENT REGIONS / 0.3.0",getWidth()-390,getHeight()-35,362,18,Justification::centredRight);
 }
 void BassRackEditor::resized() {
-    const int w=getWidth(),c=getHeight()-372;
+    const int w=getWidth(),c=getHeight()-426;
     title.setBounds(26,15,240,30);subtitle.setBounds(28,45,280,18);
     presets.setBounds(w-630,22,242,32);scanButton.setBounds(w-372,22,124,32);
     saveButton.setBounds(w-236,22,96,32);loadButton.setBounds(w-128,22,100,32);
     for(int b=0;b<5;++b)bandButtons[static_cast<size_t>(b)].setBounds(26+b*58,90,50,28);
     addButton.setBounds(328,90,30,28);removeButton.setBounds(366,90,30,28);
-    masterButton.setBounds(w-136,90,108,28);
-    map.setBounds(24,130,w-48,c-164);
+    oversamplingChoice.setBounds(420,90,126,28);autoGain.setBounds(562,90,126,28);
+    masterButton.setBounds(w-136,90,108,28);map.setBounds(24,130,w-48,c-164);
     const bool master=selected==BassRackProcessor::master;
-    type.setBounds(42,c+43,182,31);transfer.setBounds(42,c+89,182,109);
+    type.setBounds(42,c+43,182,31);transfer.setBounds(42,c+112,182,132);
     selectionTitle.setBounds(master?42:260,c+10,master?420:340,24);
     mute.setBounds(w-296,c+12,66,25);solo.setBounds(w-222,c+12,66,25);bypass.setBounds(w-148,c+12,104,25);
     compress.setBounds(w-200,c+12,156,25);
+    const int fw=jmin(216,static_cast<int>((w-500)*.28f)),qx=260+fw+18;
+    frequencyControl.setBounds(260,c+58,fw,26);qControl.setBounds(qx,c+58,150,26);slope.setBounds(qx+168,c+58,140,26);
+    deleteButton.setBounds(w-190,c+58,146,26);
     const int n=master?7:5,left=master?40:258,kw=(w-left-40)/n;
-    for(int i=0;i<n;++i)knobs[static_cast<size_t>(i)].setBounds(left+i*kw,c+49,kw-4,151);
-    insertTitle.setBounds(42,c+239,w-84,20);
+    for(int i=0;i<n;++i)knobs[static_cast<size_t>(i)].setBounds(left+i*kw,c+103,kw-4,151);
+    insertTitle.setBounds(42,c+293,w-84,20);
     const int iw=(w-104)/3;
-    for(int i=0;i<3;++i)inserts[static_cast<size_t>(i)].setBounds(42+i*(iw+10),c+267,iw,35);
-    statusLabel.setBounds(28,getHeight()-37,w-450,22);
+    for(int i=0;i<3;++i)inserts[static_cast<size_t>(i)].setBounds(42+i*(iw+10),c+321,iw,35);
+    statusLabel.setBounds(28,getHeight()-37,w-440,22);
 }
 void BassRackEditor::TransferCurve::paint(Graphics& g) {
     if(editor.selected==BassRackProcessor::master)return;
@@ -293,11 +315,8 @@ float BassRackEditor::BandMap::hzFor(float x) const {
 float BassRackEditor::BandMap::yFor(float db) const {
     const auto r=plot();return r.getBottom()-(jlimit(-72.f,12.f,db)+72)/84*r.getHeight();
 }
-Point<float> BassRackEditor::BandMap::node(int band) const {
-    const auto edges=editor.processor.crossovers();
-    const int count=static_cast<int>(editor.processor.value("bands"));
-    const float lo=band==0?20:edges[static_cast<size_t>(band-1)],hi=band==count-1?20000:edges[static_cast<size_t>(band)];
-    return {xFor(std::sqrt(lo*hi)),yFor(editor.processor.value(bandKey(band,"level")))};
+Point<float> BassRackEditor::BandMap::node(int band)const {
+    return {xFor(editor.processor.value(bandKey(band,"freq"))),yFor(editor.processor.value(bandKey(band,"level")))};
 }
 void BassRackEditor::BandMap::updateSpectrum() {
     std::array<float,1024> scratch{};
@@ -326,13 +345,12 @@ void BassRackEditor::BandMap::updateSpectrum() {
     for(auto& db:spectrum)db=jmax(-100.f,db-.35f);
 }
 void BassRackEditor::BandMap::paint(Graphics& g) {
-    const int count=static_cast<int>(editor.processor.value("bands"));
-    const auto edges=editor.processor.crossovers();const auto r=plot();
+    const auto r=plot();
     const double sr=editor.processor.getSampleRate()>0?editor.processor.getSampleRate():48000;
     g.setColour(Colour(0xff14181a));g.fillRoundedRectangle(getLocalBounds().toFloat(),7);
     g.setColour(edge);g.drawRoundedRectangle(getLocalBounds().toFloat().reduced(.5f),7,.8f);
     g.setFont(font(9.5f,true));g.setColour(muted);
-    g.drawText("INPUT SPECTRUM  /  CROSSOVER RESPONSE",16,9,350,16,Justification::centredLeft);
+    g.drawText("INPUT SPECTRUM / INDEPENDENT PROCESSING REGIONS",16,9,350,16,Justification::centredLeft);
     auto meter=[](float db){return db<=-99?String("-inf"):String(db,1);};
     g.drawText("IN "+meter(editor.processor.inputPeak())+"    /    OUT "+meter(editor.processor.outputPeak())+" dB",
         getWidth()-350,9,330,16,Justification::centredRight);
@@ -357,82 +375,87 @@ void BassRackEditor::BandMap::paint(Graphics& g) {
     Path spectrumFill=spectrumLine;spectrumFill.lineTo(r.getBottomRight());spectrumFill.lineTo(r.getBottomLeft());spectrumFill.closeSubPath();
     g.setGradientFill(ColourGradient(Colour(0xffc2c9cc).withAlpha(.15f),0,r.getY(),Colours::transparentBlack,0,r.getBottom(),false));
     g.fillPath(spectrumFill);g.setColour(Colour(0xffc4cbce).withAlpha(.45f));g.strokePath(spectrumLine,PathStrokeType(1.1f));
-    std::array<double,4> cutoff{};
-    for(int i=0;i<4;++i)cutoff[static_cast<size_t>(i)]=std::tan(bassrack::pi*jmin(static_cast<double>(edges[static_cast<size_t>(i)]),sr*.44)/sr);
-    for(int band=0;band<count;++band) {
+    for(int band=0;band<5;++band) {
+        if(!editor.processor.bandActive(band))continue;
         const auto colour=colours[static_cast<size_t>(band)];
         const bool selected=editor.selected==band;
         const float level=editor.processor.value(bandKey(band,"level"));
-        const bool muted=editor.processor.value(bandKey(band,"mute"))>.5f;
+        const double centre=editor.processor.value(bandKey(band,"freq")),q=editor.processor.value(bandKey(band,"q"));
+        const int order=2<<static_cast<int>(editor.processor.value(bandKey(band,"slope")));
         Path response;
-        for(int point=0;point<=400;++point) {
-            const double hz=20*std::pow(1000.,point/400.);
-            const double f=std::tan(bassrack::pi*jmin(hz,sr*.45)/sr);
-            double magnitude=1;
-            for(int split=0;split<band;++split) {
-                const double q=std::pow(f/cutoff[static_cast<size_t>(split)],4);
-                magnitude*=q/(1+q);
-            }
-            if(band<count-1)magnitude/=1+std::pow(f/cutoff[static_cast<size_t>(band)],4);
+        for(int point=0;point<=500;++point) {
+            const double hz=20*std::pow(1000.,point/500.);
+            const double magnitude=bassrack::regionMagnitude(hz,centre,q,order);
             const float db=static_cast<float>(20*std::log10(jmax(1.e-9,magnitude)))+level;
-            const float x=r.getX()+r.getWidth()*point/400.f,y=yFor(db);
+            const float x=r.getX()+r.getWidth()*point/500.f,y=yFor(db);
             if(point==0)response.startNewSubPath(x,y);else response.lineTo(x,y);
         }
         Path fill=response;fill.lineTo(r.getBottomRight());fill.lineTo(r.getBottomLeft());fill.closeSubPath();
-        g.setGradientFill(ColourGradient(colour.withAlpha(muted?.015f:selected?.19f:.075f),0,r.getY(),colour.withAlpha(.008f),0,r.getBottom(),false));
-        g.fillPath(fill);g.setColour(colour.withAlpha(muted?.25f:selected?1.f:.65f));
-        g.strokePath(response,PathStrokeType(selected?2.2f:1.35f,PathStrokeType::curved));
+        g.setGradientFill(ColourGradient(colour.withAlpha(selected?.22f:.09f),0,r.getY(),colour.withAlpha(.008f),0,r.getBottom(),false));
+        g.fillPath(fill);g.setColour(colour.withAlpha(selected?1.f:.65f));
+        g.strokePath(response,PathStrokeType(selected?2.2f:1.4f,PathStrokeType::curved));
     }
     g.restoreState();
-    for(int i=0;i<count-1;++i) {
-        const float x=xFor(edges[static_cast<size_t>(i)]);
-        g.setColour(colours[static_cast<size_t>(i)].withAlpha(.25f));
-        g.drawVerticalLine(static_cast<int>(x),r.getY()+8,r.getBottom());
-        g.setColour(colours[static_cast<size_t>(i)]);
-        Path handle;handle.addTriangle(x-4,r.getY(),x+4,r.getY(),x,r.getY()+6);g.fillPath(handle);
-        g.setFont(font(9));g.setColour(text.withAlpha(.8f));
-        g.drawText(frequency(edges[static_cast<size_t>(i)]),static_cast<int>(x-24),static_cast<int>(r.getBottom()-21),48,15,Justification::centred);
-    }
-    for(int band=0;band<count;++band) {
+    for(int band=0;band<5;++band) {
+        if(!editor.processor.bandActive(band))continue;
         const auto position=node(band);const bool selected=editor.selected==band;
         const auto colour=colours[static_cast<size_t>(band)];
-        if(selected){g.setColour(colour.withAlpha(.13f));g.fillEllipse(position.x-16,position.y-16,32,32);}
+        if(selected) {
+            const auto edges=bassrack::regionEdges(editor.processor.value(bandKey(band,"freq")),editor.processor.value(bandKey(band,"q")));
+            for(double hz:edges) {
+                if(hz<20||hz>20000)continue;
+                const float x=xFor(static_cast<float>(hz));
+                g.setColour(colour.withAlpha(.35f));g.drawVerticalLine(static_cast<int>(x),r.getY()+16,r.getBottom());
+                g.setColour(colour);g.fillRoundedRectangle(x-3,r.getCentreY()-11,6,22,2);
+                g.setFont(font(9));g.drawText(frequency(static_cast<float>(hz)),static_cast<int>(x-22),static_cast<int>(r.getBottom()-20),44,15,Justification::centred);
+            }
+            g.setColour(colour.withAlpha(.13f));g.fillEllipse(position.x-16,position.y-16,32,32);
+        }
         g.setColour(Colour(0xff171c1f));g.fillEllipse(position.x-9,position.y-9,18,18);
         g.setColour(colour);g.drawEllipse(position.x-9,position.y-9,18,18,selected?2.f:1.f);
         g.setFont(font(10,true));g.drawText(String(band+1),static_cast<int>(position.x-9),static_cast<int>(position.y-8),18,16,Justification::centred);
     }
 }
 void BassRackEditor::BandMap::mouseDown(const MouseEvent& e) {
-    const int count=static_cast<int>(editor.processor.value("bands"));
-    const auto xs=editor.processor.crossovers();
-    for(int band=0;band<count;++band)if(e.position.getDistanceFrom(node(band))<13) {
-        gainBand=band;editor.select(band);
-        editor.processor.state.getParameter(bandKey(band,"level"))->beginChangeGesture();return;
+    for(int band=0;band<5;++band)if(editor.processor.bandActive(band)&&e.position.getDistanceFrom(node(band))<16) {
+        editor.select(band);
+        if(e.mods.isPopupMenu()){editor.changeCount(-1);return;}
+        gainBand=band;dragY=e.position.y;dragGain=editor.processor.value(bandKey(band,"level"));
+        for(auto* id:{"level","freq"})editor.processor.state.getParameter(bandKey(band,id))->beginChangeGesture();
+        return;
     }
-    for(int i=0;i<count-1;++i)if(std::abs(e.position.x-xFor(xs[static_cast<size_t>(i)]))<9) {
-        dragging=i;editor.processor.state.getParameter("x"+String(i))->beginChangeGesture();return;
+    if(editor.selected!=BassRackProcessor::master) {
+        const int band=editor.selected;
+        const auto edges=bassrack::regionEdges(editor.processor.value(bandKey(band,"freq")),editor.processor.value(bandKey(band,"q")));
+        for(double hz:edges)if(std::abs(e.position.x-xFor(static_cast<float>(hz)))<9) {
+            dragging=band;editor.processor.state.getParameter(bandKey(band,"q"))->beginChangeGesture();return;
+        }
     }
-    const float hz=hzFor(e.position.x);int band=0;
-    while(band<count-1 && hz>xs[static_cast<size_t>(band)])++band;
-    editor.select(band);
 }
 void BassRackEditor::BandMap::mouseDrag(const MouseEvent& e) {
     if(gainBand>=0) {
-        const auto r=plot();const float db=jlimit(-36.f,12.f,(r.getBottom()-e.position.y)/r.getHeight()*84-72);
-        auto* parameter=editor.processor.state.getParameter(bandKey(gainBand,"level"));
-        parameter->setValueNotifyingHost(parameter->convertTo0to1(db));repaint();return;
+        auto* frequency=editor.processor.state.getParameter(bandKey(gainBand,"freq"));
+        frequency->setValueNotifyingHost(frequency->convertTo0to1(hzFor(e.position.x)));
+        const float db=jlimit(-36.f,12.f,dragGain+(dragY-e.position.y)*84/plot().getHeight());
+        auto* level=editor.processor.state.getParameter(bandKey(gainBand,"level"));
+        level->setValueNotifyingHost(level->convertTo0to1(db));repaint();return;
     }
     if(dragging<0)return;
-    const int count=static_cast<int>(editor.processor.value("bands"));const auto xs=editor.processor.crossovers();
-    const float minimum=dragging==0?25.f:xs[static_cast<size_t>(dragging-1)]*1.08f;
-    const float maximum=dragging==count-2?19000.f:xs[static_cast<size_t>(dragging+1)]/1.08f;
-    if(minimum>maximum)return;
-    auto* parameter=editor.processor.state.getParameter("x"+String(dragging));
-    parameter->setValueNotifyingHost(parameter->convertTo0to1(jlimit(minimum,maximum,hzFor(e.position.x))));repaint();
+    const double centre=editor.processor.value(bandKey(dragging,"freq")),edge=hzFor(e.position.x);
+    const double width=std::abs(edge-centre*centre/edge);
+    const float q=static_cast<float>(jlimit(.2,16.,centre/jmax(.01,width)));
+    auto* p=editor.processor.state.getParameter(bandKey(dragging,"q"));
+    p->setValueNotifyingHost(p->convertTo0to1(q));repaint();
 }
 void BassRackEditor::BandMap::mouseUp(const MouseEvent&) {
-    if(dragging>=0)editor.processor.state.getParameter("x"+String(dragging))->endChangeGesture();
-    if(gainBand>=0)editor.processor.state.getParameter(bandKey(gainBand,"level"))->endChangeGesture();
+    if(dragging>=0)editor.processor.state.getParameter(bandKey(dragging,"q"))->endChangeGesture();
+    if(gainBand>=0)for(auto* id:{"level","freq"})editor.processor.state.getParameter(bandKey(gainBand,id))->endChangeGesture();
     dragging=gainBand=-1;
 }
 void BassRackEditor::BandMap::mouseDoubleClick(const MouseEvent& e){editor.addAt(hzFor(e.position.x));}
+void BassRackEditor::BandMap::mouseWheelMove(const MouseEvent& e,const MouseWheelDetails& wheel) {
+    for(int b=0;b<5;++b)if(editor.processor.bandActive(b)&&e.position.getDistanceFrom(node(b))<25) {
+        editor.processor.setParam(bandKey(b,"q"),jlimit(.2f,16.f,editor.processor.value(bandKey(b,"q"))*std::exp(wheel.deltaY*3)));
+        editor.select(b);return;
+    }
+}

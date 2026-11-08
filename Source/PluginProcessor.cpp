@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "EffectsScanner.h"
 
 using namespace juce;
 namespace {
@@ -14,131 +15,187 @@ public:
     void closeButtonPressed() override {setVisible(false);}
 };
 }
+
 AudioProcessorValueTreeState::ParameterLayout BassRackProcessor::parameters() {
     AudioProcessorValueTreeState::ParameterLayout p;
-    auto floating=[&](String id,String name,float min,float max,float def,float skew=1.f){
-        NormalisableRange<float> range(min,max,0.001f,skew);
-        p.add(std::make_unique<AudioParameterFloat>(ParameterID{id,1},name,range,def));
+    auto floating=[&](String id,String name,float lo,float hi,float def,float skew=1.f){
+        p.add(std::make_unique<AudioParameterFloat>(ParameterID{id,1},name,NormalisableRange<float>(lo,hi,.001f,skew),def));
     };
-    p.add(std::make_unique<AudioParameterInt>(ParameterID{"bands",1},"Band count",1,5,3));
-    const float defaults[]{90,350,2500,8000};
-    for(int i=0;i<4;++i) floating("x"+String(i),"Crossover "+String(i+1),20,20000,defaults[i],0.25f);
+    // Retained for reading older projects; independent active flags now define regions.
+    p.add(std::make_unique<AudioParameterInt>(ParameterID{"bands",1},"Legacy band count",0,5,1));
+    for(int i=0;i<4;++i)floating("x"+String(i),"Legacy crossover "+String(i+1),20,20000,90.f*(i+1),.25f);
+    const float defaults[]{55,160,800,2500,7000};
     for(int b=0;b<bands;++b) {
-        const String prefix="Band "+String(b+1)+" ";
-        p.add(std::make_unique<AudioParameterChoice>(ParameterID{key(b,"type"),1},prefix+"distortion",
-            StringArray{"Clean","Soft","Tube","Clip","Fold","Sine"},0));
-        floating(key(b,"drive"),prefix+"drive",0,36,0);
-        floating(key(b,"mix"),prefix+"distortion mix",0,1,1);
-        floating(key(b,"level"),prefix+"level",-36,12,0);
-        floating(key(b,"width"),prefix+"width",0,2,1);
+        String prefix="Region "+String(b+1)+" ";
+        p.add(std::make_unique<AudioParameterBool>(ParameterID{key(b,"active"),1},prefix+"active",b==0));
+        floating(key(b,"freq"),prefix+"frequency",20,20000,defaults[b],.25f);
+        floating(key(b,"q"),prefix+"Q",.2f,16,1,.4f);
+        p.add(std::make_unique<AudioParameterChoice>(ParameterID{key(b,"slope"),1},prefix+"slope",StringArray{"12 dB/oct","24 dB/oct","48 dB/oct","96 dB/oct"},1));
+        p.add(std::make_unique<AudioParameterChoice>(ParameterID{key(b,"type"),1},prefix+"distortion",StringArray{"Clean","Soft","Tube","Clip","Fold","Sine"},0));
+        floating(key(b,"drive"),prefix+"drive",0,36,0);floating(key(b,"mix"),prefix+"distortion mix",0,1,1);
+        floating(key(b,"level"),prefix+"level",-36,12,0);floating(key(b,"width"),prefix+"width",0,2,1);
         floating(key(b,"pan"),prefix+"pan",-1,1,0);
-        p.add(std::make_unique<AudioParameterBool>(ParameterID{key(b,"mute"),1},prefix+"mute",false));
-        p.add(std::make_unique<AudioParameterBool>(ParameterID{key(b,"solo"),1},prefix+"solo",false));
-        p.add(std::make_unique<AudioParameterBool>(ParameterID{key(b,"bypass"),1},prefix+"bypass",false));
+        for(auto* id:{"mute","solo","bypass"})p.add(std::make_unique<AudioParameterBool>(ParameterID{key(b,id),1},prefix+id,false));
     }
-    floating("bass","Master bass",-12,12,0);
-    floating("air","Master treble",-12,12,0);
-    floating("threshold","Compressor threshold",-48,0,-12);
-    floating("ratio","Compressor ratio",1,10,2);
-    floating("attack","Compressor attack",0.1f,100,15,0.4f);
-    floating("release","Compressor release",10,600,120,0.5f);
+    p.add(std::make_unique<AudioParameterChoice>(ParameterID{"oversampling",1},"Oversampling",StringArray{"Off / 1x","2x","4x","8x","16x"},1));
+    p.add(std::make_unique<AudioParameterBool>(ParameterID{"autogain",1},"Auto Gain",false));
+    floating("bass","Master bass",-12,12,0);floating("air","Master treble",-12,12,0);
+    floating("threshold","Compressor threshold",-48,0,-12);floating("ratio","Compressor ratio",1,10,2);
+    floating("attack","Compressor attack",.1f,100,15,.4f);floating("release","Compressor release",10,600,120,.5f);
     p.add(std::make_unique<AudioParameterBool>(ParameterID{"compress",1},"Master compressor",false));
-    floating("output","Output trim",-36,12,-6);
+    floating("output","Output trim",-36,12,0);
     return p;
 }
 BassRackProcessor::BassRackProcessor()
-:AudioProcessor(BusesProperties().withInput("Input",AudioChannelSet::stereo(),true)
-    .withOutput("Output",AudioChannelSet::stereo(),true)),
+:AudioProcessor(BusesProperties().withInput("Input",AudioChannelSet::stereo(),true).withOutput("Output",AudioChannelSet::stereo(),true)),
  state(*this,nullptr,"BASSRACK",parameters()) {
-    formats.addDefaultFormats();
-    knownFile=File::getSpecialLocation(File::userApplicationDataDirectory)
-        .getChildFile("BassRack").getChildFile("known-plugins.xml");
+    formats.addFormat(new EffectsOnlyAUFormat);
+    knownFile=File::getSpecialLocation(File::userApplicationDataDirectory).getChildFile("BassRack").getChildFile("known-plugins.xml");
     knownFile.getParentDirectory().createDirectory();
-    if(auto xml=XmlDocument::parse(knownFile)) known.recreateFromXml(*xml);
+    if(auto xml=XmlDocument::parse(knownFile))known.recreateFromXml(*xml);
+    for(const auto& description:known.getTypes())if(!effectEligible(description))known.removeType(description);
+    for(int b=0;b<bands;++b) {
+        filterDirty[b].store(true);
+        for(auto* suffix:{"freq","q","slope"})state.addParameterListener(key(b,suffix),this);
+    }
+    state.addParameterListener("oversampling",this);
+    for(int b=0;b<bands;++b)state.addParameterListener(key(b,"active"),this);
 }
 BassRackProcessor::~BassRackProcessor() {
     cancelPendingUpdate();
+    state.removeParameterListener("oversampling",this);
+    for(int b=0;b<bands;++b)for(auto* suffix:{"freq","q","slope","active"})state.removeParameterListener(key(b,suffix),this);
     closePluginWindows();
-    if(auto xml=known.createXml()) {knownFile.getParentDirectory().createDirectory(); xml->writeTo(knownFile);}
+    if(auto xml=known.createXml())xml->writeTo(knownFile);
 }
-bool BassRackProcessor::isBusesLayoutSupported(const BusesLayout& layout) const {
-    return (layout.getMainInputChannelSet()==AudioChannelSet::stereo()
-        || layout.getMainInputChannelSet()==AudioChannelSet::mono())
-        && layout.getMainOutputChannelSet()==AudioChannelSet::stereo();
+bool BassRackProcessor::effectEligible(const PluginDescription& d) {
+    return !d.isInstrument&&eligibleAU(d.fileOrIdentifier)&&d.name!="Bass Rack"&&!d.fileOrIdentifier.endsWith("aufx,BsRk,Crsn");
 }
-float BassRackProcessor::value(const String& id) const {return state.getRawParameterValue(id)->load();}
+bool BassRackProcessor::isBusesLayoutSupported(const BusesLayout& l)const {
+    return (l.getMainInputChannelSet()==AudioChannelSet::mono()||l.getMainInputChannelSet()==AudioChannelSet::stereo())
+        &&l.getMainOutputChannelSet()==AudioChannelSet::stereo();
+}
+float BassRackProcessor::value(const String& id)const{return state.getRawParameterValue(id)->load();}
 void BassRackProcessor::setParam(const String& id,float v) {
-    if(auto* p=state.getParameter(id)) {
-        p->beginChangeGesture(); p->setValueNotifyingHost(p->convertTo0to1(v)); p->endChangeGesture();
-    }
+    if(auto* p=state.getParameter(id)){p->beginChangeGesture();p->setValueNotifyingHost(p->convertTo0to1(v));p->endChangeGesture();}
 }
-std::array<float,4> BassRackProcessor::crossovers() const {
-    std::array<float,4> out{};
-    float last=20;
-    for(int i=0;i<4;++i) {out[i]=jlimit(last,20000.f,value("x"+String(i))); last=out[i];}
-    return out;
+int BassRackProcessor::addRegion(float hz) {
+    for(int b=0;b<bands;++b)if(!bandActive(b)) {
+        setParam(key(b,"freq"),hz);setParam(key(b,"q"),1);setParam(key(b,"slope"),1);
+        setParam(key(b,"active"),1);return b;
+    }
+    return -1;
+}
+void BassRackProcessor::deleteRegion(int b) {
+    if(b<0||b>=bands)return;
+    setParam(key(b,"active"),0);setParam(key(b,"solo"),0);
+    for(int i=0;i<slots;++i)removePlugin(b,i);
+    for(auto* id:{"type","drive","level","pan","mute","bypass"})setParam(key(b,id),0);
+    setParam(key(b,"mix"),1);setParam(key(b,"width"),1);
+}
+void BassRackProcessor::parameterChanged(const String& id,float) {
+    for(int b=0;b<bands;++b)
+        if(id==key(b,"freq")||id==key(b,"q")||id==key(b,"slope"))filterDirty[b].store(true);
+    triggerAsyncUpdate();
+}
+AudioBuffer<float> BassRackProcessor::designRegion(int b,double sr)const {
+    constexpr int n=16384;
+    dsp::FFT transform(14);
+    std::vector<std::complex<float>> frequency(n),time(n);
+    const double centre=jlimit(20.,sr*.43,static_cast<double>(value(key(b,"freq"))));
+    const double q=value(key(b,"q"));const int order=2<<static_cast<int>(value(key(b,"slope")));
+    for(int i=0;i<n;++i) {
+        const double hz=jmin(i,n-i)*sr/n;
+        frequency[static_cast<size_t>(i)]={static_cast<float>(std::sqrt(bassrack::regionMagnitude(hz,centre,q,order))),0};
+    }
+    transform.perform(frequency.data(),time.data(),true);
+    AudioBuffer<float> impulse(2,irSize);
+    double centreResponse=0;
+    for(int i=0;i<irSize;++i) {
+        const int relative=i-regionDelay;
+        const float window=.5f+.5f*static_cast<float>(std::cos(bassrack::pi*relative/regionDelay));
+        const float x=time[static_cast<size_t>((relative+n)%n)].real()*window;
+        impulse.setSample(0,i,x);impulse.setSample(1,i,x);
+        centreResponse+=x*std::cos(2*bassrack::pi*centre*relative/sr);
+    }
+    if(centreResponse>1.e-6)impulse.applyGain(static_cast<float>(1/centreResponse));
+    return impulse;
+}
+void BassRackProcessor::loadRegion(int b,AudioBuffer<float> impulse,double sr) {
+    AudioBuffer<float> copy;copy.makeCopyOf(impulse);
+    pre[b].loadImpulseResponse(std::move(impulse),sr,dsp::Convolution::Stereo::yes,dsp::Convolution::Trim::no,dsp::Convolution::Normalise::no);
+    post[b].loadImpulseResponse(std::move(copy),sr,dsp::Convolution::Stereo::yes,dsp::Convolution::Trim::no,dsp::Convolution::Normalise::no);
 }
 void BassRackProcessor::prepareToPlay(double sr,int block) {
     const ScopedLock lock(graphLock);
-    sampleRate=sr; blockSize=jmax(32,block); prepared=true; lastBandCount=0;
-    const dsp::ProcessSpec spec{sr,static_cast<uint32>(blockSize),2};
+    prepared=false;sampleRate=sr;blockSize=jmax(32,block);activeOS=-1;
+    dsp::ProcessSpec spec{sr,static_cast<uint32>(blockSize),2};
+    original.setSize(2,blockSize);matching.setSize(2,blockSize);
+    dryAlignment.prepare();matchAlignment.prepare();autoLevel.prepare(sr);autoDb.store(0);
     for(int b=0;b<bands;++b) {
-        audio[b].setSize(2,blockSize);
-        oversampling[b]=std::make_unique<dsp::Oversampling<float>>(2,1,
-            dsp::Oversampling<float>::filterHalfBandPolyphaseIIR,true,true);
-        oversampling[b]->initProcessing(static_cast<size_t>(blockSize));
-        alignment[b].prepare();
-        for(auto& d:dc[b]) d.prepare(sr*2);
+        audio[b].setSize(2,blockSize);reference[b].setSize(2,blockSize);
+        wetAlignment[b].prepare();referenceAlignment[b].prepare();
+        loadRegion(b,designRegion(b,sr),sr);filterDirty[b].store(false);
+        pre[b].prepare(spec);post[b].prepare(spec);
+        for(int mode=1;mode<=4;++mode) {
+            for(auto* bank:{&oversampling,&referenceOS}) {
+                (*bank)[b][mode]=std::make_unique<dsp::Oversampling<float>>(2,static_cast<size_t>(mode),
+                    dsp::Oversampling<float>::filterHalfBandPolyphaseIIR,true,true);
+                (*bank)[b][mode]->initProcessing(static_cast<size_t>(blockSize));
+            }
+        }
         auto& c=smooth[b];
-        c.drive.reset(sr*2,.02); c.mix.reset(sr*2,.02);
-        c.level.reset(sr,.02); c.width.reset(sr,.02); c.pan.reset(sr,.02);
-        c.drive.setCurrentAndTargetValue(value(key(b,"drive")));
-        c.mix.setCurrentAndTargetValue(value(key(b,"mix")));
+        c.level.reset(sr,.02);c.width.reset(sr,.02);c.pan.reset(sr,.02);
         c.level.setCurrentAndTargetValue(bassrack::gain(value(key(b,"level"))));
-        c.width.setCurrentAndTargetValue(value(key(b,"width")));
-        c.pan.setCurrentAndTargetValue(value(key(b,"pan")));
+        c.width.setCurrentAndTargetValue(value(key(b,"width")));c.pan.setCurrentAndTargetValue(value(key(b,"pan")));
     }
-    osLatency=static_cast<int>(std::round(oversampling[0]->getLatencyInSamples()));
-    output.reset(sr,.02); output.setCurrentAndTargetValue(bassrack::gain(value("output")));
-    for(auto& s:splitter) s.reset();
-    lowEQ.prepare(spec); highEQ.prepare(spec); compressor.prepare(spec);
-    lowEQ.reset(); highEQ.reset(); compressor.reset();
-    for(auto& rack:chains) for(auto& s:rack)
-        if(s.plugin) {s.plugin->setRateAndBufferSizeDetails(sr,blockSize); s.plugin->prepareToPlay(sr,blockSize);}
-    updateLatency();
-    setLatencySamples(desiredLatency.load());
+    selectOversampling(static_cast<int>(value("oversampling")));
+    *lowEQ.state=dsp::IIR::ArrayCoefficients<float>::makeLowShelf(sr,120,.707f,bassrack::gain(value("bass")));
+    *highEQ.state=dsp::IIR::ArrayCoefficients<float>::makeHighShelf(sr,jmin(4000.,sr*.4),.707f,bassrack::gain(value("air")));
+    lowEQ.prepare(spec);highEQ.prepare(spec);compressor.prepare(spec);
+    lowEQ.reset();highEQ.reset();compressor.reset();
+    output.reset(sr,.02);output.setCurrentAndTargetValue(bassrack::gain(value("output")));
+    for(auto& rack:chains)for(auto& s:rack)if(s.plugin){s.plugin->setRateAndBufferSizeDetails(sr,blockSize);s.plugin->prepareToPlay(sr,blockSize);}
+    prepared=true;updateLatency();setLatencySamples(desiredLatency.load());
+}
+void BassRackProcessor::selectOversampling(int mode) {
+    mode=jlimit(0,4,mode);if(activeOS==mode)return;activeOS=mode;
+    osLatency=mode>0?static_cast<int>(std::round(oversampling[0][mode]->getLatencyInSamples())):0;
+    for(int b=0;b<bands;++b) {
+        if(mode>0){oversampling[b][mode]->reset();referenceOS[b][mode]->reset();}
+        const double rate=sampleRate*(1<<mode);
+        smooth[b].drive.reset(rate,.02);smooth[b].mix.reset(rate,.02);
+        smooth[b].drive.setCurrentAndTargetValue(value(key(b,"drive")));
+        smooth[b].mix.setCurrentAndTargetValue(value(key(b,"mix")));
+        for(auto& d:dc[b])d.prepare(rate);
+    }
 }
 void BassRackProcessor::releaseResources() {
-    const ScopedLock lock(graphLock); prepared=false;
-    for(auto& rack:chains) for(auto& s:rack) if(s.plugin) s.plugin->releaseResources();
+    const ScopedLock lock(graphLock);prepared=false;
+    for(auto& rack:chains)for(auto& s:rack)if(s.plugin)s.plugin->releaseResources();
 }
 void BassRackProcessor::reset() {
     const ScopedLock lock(graphLock);
-    for(auto& s:splitter) s.reset();
-    for(auto& d:alignment) d.reset();
-    for(auto& os:oversampling) if(os)os->reset();
-    for(auto& pair:dc) for(auto& d:pair)d.reset();
-    lowEQ.reset(); highEQ.reset(); compressor.reset();
-    for(auto& rack:chains) for(auto& s:rack) if(s.plugin)s.plugin->reset();
+    for(int b=0;b<bands;++b) {
+        pre[b].reset();post[b].reset();wetAlignment[b].reset();referenceAlignment[b].reset();
+        for(int m=1;m<=4;++m){if(oversampling[b][m])oversampling[b][m]->reset();if(referenceOS[b][m])referenceOS[b][m]->reset();}
+        for(auto& d:dc[b])d.reset();
+    }
+    dryAlignment.reset();matchAlignment.reset();autoLevel.reset();autoDb.store(0);
+    lowEQ.reset();highEQ.reset();compressor.reset();
+    for(auto& rack:chains)for(auto& s:rack)if(s.plugin)s.plugin->reset();
 }
-int BassRackProcessor::rackLatency(int rack) const {
-    int sum=0;
-    for(const auto& s:chains[rack]) if(s.plugin) sum+=jmax(0,s.plugin->getLatencySamples());
-    return sum;
+int BassRackProcessor::rackLatency(int rack)const {
+    int sum=0;for(const auto& s:chains[rack])if(s.plugin)sum+=jmax(0,s.plugin->getLatencySamples());return sum;
 }
 void BassRackProcessor::updateLatency() {
-    const int n=jlimit(1,5,static_cast<int>(value("bands")));
-    int maximum=0;
-    for(int b=0;b<n;++b) maximum=jmax(maximum,rackLatency(b));
-    const int latency=osLatency+maximum+rackLatency(master);
-    if(desiredLatency.exchange(latency)!=latency) triggerAsyncUpdate();
+    int maximum=0;for(int b=0;b<bands;++b)if(bandActive(b))maximum=jmax(maximum,rackLatency(b));
+    int latency=2*regionDelay+osLatency+maximum+rackLatency(master);
+    if(desiredLatency.exchange(latency)!=latency)triggerAsyncUpdate();
 }
 void BassRackProcessor::processRack(int rack,AudioBuffer<float>& buffer) {
     MidiBuffer midi;
-    for(auto& s:chains[rack]) if(s.plugin) {
-        s.plugin->setPlayHead(getPlayHead());
-        s.plugin->processBlock(buffer,midi); midi.clear();
-    }
+    for(auto& s:chains[rack])if(s.plugin){s.plugin->setPlayHead(getPlayHead());s.plugin->processBlock(buffer,midi);midi.clear();}
 }
 void BassRackProcessor::processBlock(AudioBuffer<float>& buffer,MidiBuffer& midi) {
     const ScopedTryLock lock(graphLock);
@@ -179,78 +236,78 @@ int BassRackProcessor::readAnalyzer(float* destination,int maximum) {
     return size1+size2;
 }
 void BassRackProcessor::processChunk(AudioBuffer<float>& buffer) {
-    const int count=jlimit(1,5,static_cast<int>(value("bands")));
-    const int size=buffer.getNumSamples();
-    const bool topologyChanged=count!=lastBandCount;
-    if(topologyChanged) {for(auto& s:splitter)s.reset(); lastBandCount=count;}
-    const auto xs=crossovers();
-    for(auto& s:splitter)s.configure(sampleRate,count,xs);
-    for(int i=0;i<size;++i)
-        for(int ch=0;ch<2;++ch) {
-            const auto split=splitter[ch].process(buffer.getSample(ch,i));
-            for(int b=0;b<count;++b)audio[b].setSample(ch,i,split[b]);
-        }
-    int maxLatency=0; bool anySolo=false;
-    for(int b=0;b<count;++b) {
-        maxLatency=jmax(maxLatency,rackLatency(b));
-        anySolo=anySolo || value(key(b,"solo"))>.5f;
-    }
-    // Fail closed instead of silently misaligning extremely high-latency plugins.
-    if(maxLatency>=bassrack::StereoDelay::capacity) {
-        message="A band chain exceeds the 262143-sample latency limit."; buffer.clear();return;
-    }
-    buffer.clear();
-    for(int b=0;b<count;++b) {
-        auto& c=smooth[b]; const bool bypass=value(key(b,"bypass"))>.5f;
-        const int type=bypass?0:static_cast<int>(value(key(b,"type")));
-        c.drive.setTargetValue(value(key(b,"drive")));
-        c.mix.setTargetValue(value(key(b,"mix")));
+    selectOversampling(static_cast<int>(value("oversampling")));
+    const int n=buffer.getNumSamples();bool solo=false;int maximum=0;
+    for(int b=0;b<bands;++b)if(bandActive(b)){maximum=jmax(maximum,rackLatency(b));solo=solo||value(key(b,"solo"))>.5f;}
+    const int baseDelay=2*regionDelay+osLatency+maximum;
+    if(baseDelay+rackLatency(master)>=bassrack::StereoDelay::capacity){buffer.clear();return;}
+    original.copyFrom(0,0,buffer,0,0,n);original.copyFrom(1,0,buffer,1,0,n);
+    matching.copyFrom(0,0,buffer,0,0,n);matching.copyFrom(1,0,buffer,1,0,n);
+    dryAlignment.process(buffer.getWritePointer(0),buffer.getWritePointer(1),n,baseDelay);
+    matchAlignment.process(matching.getWritePointer(0),matching.getWritePointer(1),n,baseDelay+rackLatency(master));
+    if(solo)buffer.clear();
+    for(int b=0;b<bands;++b) {
+        if(!bandActive(b))continue;
+        const bool bypass=value(key(b,"bypass"))>.5f,mute=value(key(b,"mute"))>.5f;
+        auto& c=smooth[b];const int type=bypass?0:static_cast<int>(value(key(b,"type")));
+        c.drive.setTargetValue(value(key(b,"drive")));c.mix.setTargetValue(value(key(b,"mix")));
         c.level.setTargetValue(bassrack::gain(value(key(b,"level"))));
-        c.width.setTargetValue(bypass?1.f:value(key(b,"width")));
-        c.pan.setTargetValue(bypass?0.f:value(key(b,"pan")));
-        float* channels[]{audio[b].getWritePointer(0),audio[b].getWritePointer(1)};
-        AudioBuffer<float> band(channels,2,size);
-        dsp::AudioBlock<float> block(band);
-        auto up=oversampling[b]->processSamplesUp(block);
+        c.width.setTargetValue(value(key(b,"width")));c.pan.setTargetValue(value(key(b,"pan")));
+        audio[b].copyFrom(0,0,original,0,0,n);audio[b].copyFrom(1,0,original,1,0,n);
+        float* wetChannels[]{audio[b].getWritePointer(0),audio[b].getWritePointer(1)};
+        float* refChannels[]{reference[b].getWritePointer(0),reference[b].getWritePointer(1)};
+        AudioBuffer<float> wet(wetChannels,2,n),ref(refChannels,2,n);
+        dsp::AudioBlock<float> wetBlock(wet);
+        dsp::ProcessContextReplacing<float> preContext(wetBlock);pre[b].process(preContext);
+        ref.copyFrom(0,0,wet,0,0,n);ref.copyFrom(1,0,wet,1,0,n);
+        dsp::AudioBlock<float> refBlock(ref);
+        auto up=activeOS>0?oversampling[b][activeOS]->processSamplesUp(wetBlock):wetBlock;
+        if(activeOS>0)referenceOS[b][activeOS]->processSamplesUp(refBlock);
         for(size_t i=0;i<up.getNumSamples();++i) {
             const float drive=c.drive.getNextValue(),mix=c.mix.getNextValue();
             for(int ch=0;ch<2;++ch) {
                 float& x=up.getChannelPointer(static_cast<size_t>(ch))[i];
-                const float wet=dc[b][ch].process(bassrack::distort(x,drive,type));
-                if(type!=0)x+=(wet-x)*mix;
+                const float shaped=dc[b][ch].process(bassrack::distort(x,drive,type));
+                if(type!=0)x+=(shaped-x)*mix;
             }
         }
-        oversampling[b]->processSamplesDown(block);
-        // Skip the chain on bypass and supply its latency ourselves. Hosted
-        // processBlockBypassed implementations do not universally preserve delay.
-        if(!bypass)processRack(b,band);
-        alignment[b].process(channels[0],channels[1],size,
-            bypass?maxLatency:maxLatency-rackLatency(b));
-        const bool audible=value(key(b,"mute"))<.5f && (!anySolo || value(key(b,"solo"))>.5f);
-        for(int i=0;i<size;++i) {
-            float l=channels[0][i],r=channels[1][i];
+        if(activeOS>0){oversampling[b][activeOS]->processSamplesDown(wetBlock);referenceOS[b][activeOS]->processSamplesDown(refBlock);}
+        processRack(b,wet);
+        wetAlignment[b].process(wetChannels[0],wetChannels[1],n,maximum-rackLatency(b));
+        referenceAlignment[b].process(refChannels[0],refChannels[1],n,maximum);
+        for(int i=0;i<n;++i) {
+            float l=wetChannels[0][i],r=wetChannels[1][i];
             bassrack::image(l,r,c.width.getNextValue(),c.pan.getNextValue());
-            const float level=c.level.getNextValue()*(audible?1.f:0.f);
-            buffer.addSample(0,i,l*level); buffer.addSample(1,i,r*level);
+            const float gain=c.level.getNextValue()*(mute?0.f:1.f);
+            const bool selected=value(key(b,"solo"))>.5f;
+            for(int ch=0;ch<2;++ch) {
+                const float reference=refChannels[ch][i],processed=(ch==0?l:r)*gain;
+                float result=bypass?reference:processed;
+                if(solo)result=selected?result:0;
+                else result=bypass?0:result-reference;
+                wetChannels[ch][i]=result;
+            }
         }
+        // Re-filter only the change, so generated harmonics remain local to the region.
+        dsp::ProcessContextReplacing<float> postContext(wetBlock);post[b].process(postContext);
+        buffer.addFrom(0,0,wet,0,0,n);buffer.addFrom(1,0,wet,1,0,n);
     }
     *lowEQ.state=dsp::IIR::ArrayCoefficients<float>::makeLowShelf(sampleRate,120,.707f,bassrack::gain(value("bass")));
     *highEQ.state=dsp::IIR::ArrayCoefficients<float>::makeHighShelf(sampleRate,jmin(4000.,sampleRate*.4),.707f,bassrack::gain(value("air")));
-    dsp::AudioBlock<float> finalBlock(buffer); dsp::ProcessContextReplacing<float> context(finalBlock);
-    lowEQ.process(context); highEQ.process(context);
-    compressor.setThreshold(value("threshold")); compressor.setRatio(value("ratio"));
-    compressor.setAttack(value("attack")); compressor.setRelease(value("release"));
-    if(value("compress")>.5f) compressor.process(context);
-    processRack(master,buffer);
-    output.setTargetValue(bassrack::gain(value("output")));
-    for(int i=0;i<size;++i) {
-        const float gain=output.getNextValue();
-        for(int ch=0;ch<2;++ch) {
-            const float x=buffer.getSample(ch,i)*gain;
-            buffer.setSample(ch,i,std::isfinite(x)?x:0.f);
-        }
+    dsp::AudioBlock<float> finalBlock(buffer);dsp::ProcessContextReplacing<float> context(finalBlock);
+    lowEQ.process(context);highEQ.process(context);
+    compressor.setThreshold(value("threshold"));compressor.setRatio(value("ratio"));
+    compressor.setAttack(value("attack"));compressor.setRelease(value("release"));
+    if(value("compress")>.5f)compressor.process(context);
+    processRack(master,buffer);output.setTargetValue(bassrack::gain(value("output")));
+    for(int i=0;i<n;++i) {
+        const float l=buffer.getSample(0,i),r=buffer.getSample(1,i);
+        const float il=matching.getSample(0,i),ir=matching.getSample(1,i);
+        const float compensation=autoLevel.process(.5f*(il*il+ir*ir),.5f*(l*l+r*r),value("autogain")>.5f&&!solo);
+        const float gain=compensation*output.getNextValue();
+        for(int ch=0;ch<2;++ch){const float v=buffer.getSample(ch,i)*gain;buffer.setSample(ch,i,std::isfinite(v)?v:0);}
     }
-    updateLatency();
+    autoDb.store(autoLevel.db());updateLatency();
 }
 double BassRackProcessor::getTailLengthSeconds() const {
     const ScopedLock lock(graphLock);
@@ -265,8 +322,7 @@ double BassRackProcessor::getTailLengthSeconds() const {
 void BassRackProcessor::closePluginWindows() {windows.clear();}
 void BassRackProcessor::loadPlugin(int rack,int slot,const PluginDescription& description,MemoryBlock initial) {
     if(rack<0||rack>=racks||slot<0||slot>=slots)return;
-    if(description.isInstrument || description.name=="Bass Rack"
-        || description.fileOrIdentifier.containsIgnoreCase("audio.crimson.bassrack")) {
+    if(!effectEligible(description)) {
         const ScopedLock lock(graphLock); message="Choose an audio effect other than Bass Rack."; return;
     }
     uint64_t generation;
@@ -323,14 +379,18 @@ void BassRackProcessor::editPlugin(int rack,int slot) {
     }
 }
 void BassRackProcessor::showScanner() {
-    auto* list=new PluginListComponent(formats,known,
-        knownFile.getSiblingFile("scan-in-progress.txt"),nullptr,true);
-    list->setSize(660,420);
-    windows.add(new PluginWindow("AU effects - scan before adding inserts",list));
+    if(scannerWindow!=nullptr){scannerWindow->setVisible(true);scannerWindow->toFront(true);return;}
+    WeakReference<BassRackProcessor> weak(this);
+    auto* panel=new EffectScanPanel(formats,known,[weak](String text){
+        if(weak!=nullptr){const ScopedLock lock(weak->graphLock);weak->message=text;}
+    });
+    auto* window=new PluginWindow("Bass Rack / Effects-only AU scan",panel);
+    windows.add(window);scannerWindow=window;window->setAlwaysOnTop(true);window->toFront(true);
 }
 void BassRackProcessor::getStateInformation(MemoryBlock& dest) {
     const ScopedLock lock(graphLock);
     auto root=state.copyState();
+    root.setProperty("engineVersion",3,nullptr);
     if(auto old=root.getChildWithName("RACKS");old.isValid())root.removeChild(old,nullptr);
     ValueTree graph("RACKS");
     for(int r=0;r<racks;++r) for(int i=0;i<slots;++i) {
@@ -347,6 +407,22 @@ void BassRackProcessor::setStateInformation(const void* data,int size) {
     if(auto xml=getXmlFromBinary(data,size)) {
         auto root=ValueTree::fromXml(*xml); if(!root.hasType("BASSRACK"))return;
         const ScopedLock lock(graphLock);
+        if(static_cast<int>(root.getProperty("engineVersion",0))<3) {
+            // Old linked-crossovers cannot map exactly; preserve controls/inserts and
+            // convert their frequency spans into independent center/Q regions.
+            const int count=jlimit(1,5,static_cast<int>(root.getChildWithProperty("id","bands")["value"]));
+            auto set=[&](String id,float v){auto child=root.getChildWithProperty("id",id);if(child.isValid())child.setProperty("value",v,nullptr);
+                else {ValueTree node("PARAM");node.setProperty("id",id,nullptr);node.setProperty("value",v,nullptr);root.appendChild(node,nullptr);}};
+            float low=20;
+            for(int b=0;b<bands;++b) {
+                float high=b==count-1?20000:static_cast<float>(root.getChildWithProperty("id","x"+String(b))["value"]);
+                high=jmax(low+1,high);set(key(b,"active"),b<count?1.f:0.f);
+                set(key(b,"freq"),std::sqrt(low*high));set(key(b,"q"),jlimit(.2f,16.f,std::sqrt(low*high)/(high-low)));
+                low=high;
+            }
+            set("output",0);set("oversampling",1);set("autogain",0);
+            message="Older project converted to independent regions. Check its settings.";
+        }
         pendingRestore=root.getChildWithName("RACKS").createCopy();
         // Even a preset with no inserts must clear the existing graph.
         if(!pendingRestore.isValid())pendingRestore=ValueTree("RACKS");
@@ -371,31 +447,39 @@ void BassRackProcessor::restoreRack(ValueTree graph) {
     }
 }
 void BassRackProcessor::handleAsyncUpdate() {
-    const ScopedLock lock(graphLock);
-    if(pendingRestore.isValid()) {
-        auto graph=pendingRestore; pendingRestore={};restoreRack(graph);
+    {
+        const ScopedLock lock(graphLock);
+        if(pendingRestore.isValid()){auto graph=pendingRestore;pendingRestore={};restoreRack(graph);}
+        if(prepared){updateLatency();setLatencySamples(desiredLatency.load());}
     }
-    setLatencySamples(desiredLatency.load());
+    for(int b=0;b<bands;++b)if(filterDirty[b].exchange(false)) {
+        double sr;{const ScopedLock lock(graphLock);if(!prepared)continue;sr=sampleRate;}
+        auto impulse=designRegion(b,sr); // FFT/filter construction happens on the message thread.
+        const ScopedLock lock(graphLock);
+        if(prepared&&sampleRate==sr)loadRegion(b,std::move(impulse),sr);
+    }
 }
-void BassRackProcessor::factoryPreset(int index) {
-    // Factory settings alter stock controls, keeping user insert chains in place.
+void BassRackProcessor::factoryPreset(int preset) {
     for(int b=0;b<bands;++b) {
-        setParam(key(b,"type"),0);setParam(key(b,"drive"),0);setParam(key(b,"mix"),1);
-        setParam(key(b,"level"),0);setParam(key(b,"width"),1);setParam(key(b,"pan"),0);
-        setParam(key(b,"solo"),0);setParam(key(b,"mute"),0);setParam(key(b,"bypass"),0);
+        for(auto* id:{"type","drive","level","pan","mute","solo","bypass","active"})setParam(key(b,id),0);
+        setParam(key(b,"mix"),1);setParam(key(b,"width"),1);setParam(key(b,"q"),1);setParam(key(b,"slope"),1);
     }
-    setParam("bands",3);setParam("x0",90);setParam("x1",350);setParam("x2",2500);setParam("x3",8000);
-    setParam("bass",0);setParam("air",0);setParam("compress",0);setParam("output",-6);
+    setParam("output",0);setParam("autogain",0);setParam("oversampling",1);
+    setParam("bass",0);setParam("air",0);setParam("compress",0);
     setParam("threshold",-12);setParam("ratio",2);setParam("attack",15);setParam("release",120);
-    if(index==1) { // Clean sub, harmonics on the body and upper band
-        setParam(key(0,"width"),0);
-        setParam(key(1,"type"),2);setParam(key(1,"drive"),9);setParam(key(1,"mix"),.45f);
-        setParam(key(2,"type"),1);setParam(key(2,"drive"),12);setParam(key(2,"mix"),.35f);
-    } else if(index==2) {
-        setParam("bands",4);setParam("x0",80);setParam("x1",250);setParam("x2",1800);
-        setParam(key(0,"width"),0);setParam(key(1,"type"),3);setParam(key(1,"drive"),12);
-        setParam(key(1,"mix"),.5f);setParam(key(2,"type"),2);setParam(key(2,"drive"),18);
-        setParam(key(2,"mix"),.4f);setParam(key(3,"width"),1.3f);
+    if(preset==0) {setParam(key(0,"active"),1);setParam(key(0,"freq"),55);}
+    if(preset==1) {
+        setParam(key(0,"active"),1);setParam(key(0,"freq"),150);setParam(key(0,"q"),.65f);
+        setParam(key(0,"type"),2);setParam(key(0,"drive"),9);setParam(key(0,"mix"),.4f);
+        setParam(key(1,"active"),1);setParam(key(1,"freq"),800);setParam(key(1,"q"),.75f);
+        setParam(key(1,"type"),1);setParam(key(1,"drive"),12);setParam(key(1,"mix"),.3f);
+        setParam("autogain",1);
+    }
+    if(preset==2) {
+        setParam(key(0,"active"),1);setParam(key(0,"freq"),180);setParam(key(0,"type"),3);
+        setParam(key(0,"drive"),12);setParam(key(0,"mix"),.5f);
+        setParam(key(1,"active"),1);setParam(key(1,"freq"),1700);setParam(key(1,"type"),2);
+        setParam(key(1,"drive"),18);setParam(key(1,"mix"),.4f);setParam(key(1,"width"),1.3f);setParam("autogain",1);
     }
 }
 void BassRackProcessor::savePreset(const File& file) {

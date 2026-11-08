@@ -27,6 +27,7 @@ private:
         void mouseDrag(const juce::MouseEvent&) override;
         void mouseUp(const juce::MouseEvent&) override;
         void mouseDoubleClick(const juce::MouseEvent&) override;
+        void mouseWheelMove(const juce::MouseEvent&,const juce::MouseWheelDetails&) override;
         float xFor(float hz) const;
         float hzFor(float x) const;
         juce::Rectangle<float> plot() const;
@@ -34,6 +35,7 @@ private:
     private:
         BassRackEditor& editor;
         int dragging=-1,gainBand=-1,filled=0;
+        float dragGain=0,dragY=0;
         juce::dsp::FFT fft{11};
         juce::dsp::WindowingFunction<float> window{2048,juce::dsp::WindowingFunction<float>::hann};
         std::array<float,2048> samples{};
@@ -64,7 +66,13 @@ private:
     std::array<juce::TextButton,5> bandButtons;
     juce::TextButton masterButton{"MASTER"},addButton{"+"},removeButton{"-"},
         scanButton{"SCAN AUs"},saveButton{"SAVE"},loadButton{"LOAD"};
-    juce::ComboBox presets,type;
+    juce::ComboBox presets,type,slope,oversamplingChoice;
+    juce::Slider frequencyControl,qControl;
+    juce::TextButton deleteButton{"DELETE REGION"};
+    juce::ToggleButton autoGain{"AUTO GAIN"};
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> frequencyAttachment,qAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> slopeAttachment,osAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> autoAttachment;
     juce::ToggleButton mute{"MUTE"},solo{"SOLO"},bypass{"BYPASS"},compress{"COMPRESSOR"};
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> typeAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> muteAttachment,soloAttachment,bypassAttachment,compressAttachment;
