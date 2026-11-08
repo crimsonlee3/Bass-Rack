@@ -34,18 +34,25 @@ jobs:
           key: bassrack-macos-universal-juce806-${{ runner.arch }}-${{ hashFiles('CMakeLists.txt') }}
       - name: Ad-hoc sign for local testing
         run: codesign --force --deep --sign - "build/BassRack_artefacts/Release/AU/Bass Rack.component"
-      - name: Validate Audio Unit
+      - name: Build PKG installer and DMG
+        run: bash scripts/package-macos.sh
+      - name: Verify actual installer payload and AU
         run: |
-          mkdir -p "$HOME/Library/Audio/Plug-Ins/Components"
-          ditto "build/BassRack_artefacts/Release/AU/Bass Rack.component" "$HOME/Library/Audio/Plug-Ins/Components/Bass Rack.component"
-          /usr/libexec/PlistBuddy -c 'Print :AudioComponents' "$HOME/Library/Audio/Plug-Ins/Components/Bass Rack.component/Contents/Info.plist"
+          package=$(find build/installers -maxdepth 1 -name '*.pkg' -print -quit)
+          test -n "$package"
+          sudo /usr/sbin/installer -pkg "$package" -target /
+          component="/Library/Audio/Plug-Ins/Components/Bass Rack.component"
+          test -f "$component/Contents/Info.plist"
+          codesign --verify --deep --strict "$component"
+          lipo -verify_arch arm64 x86_64 "$component/Contents/MacOS/Bass Rack"
           killall -9 AudioComponentRegistrar || true
           sleep 3
-          auval -a
           auval -v aufx BsRk Crsn
-      - name: Package AU
-        run: ditto -c -k --sequesterRsrc --keepParent "build/BassRack_artefacts/Release/AU/Bass Rack.component" build/BassRack-AU.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: BassRack-AU-universal
-          path: build/BassRack-AU.zip
+          name: BassRack-macOS-Installers
+          path: |
+            build/installers/*.pkg
+            build/installers/*.dmg
+            build/installers/SHA256SUMS.txt
+          if-no-files-found: error

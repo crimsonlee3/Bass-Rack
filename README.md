@@ -65,17 +65,45 @@ Outputs:
 - build/BassRack_artefacts/Release/AU/Bass Rack.component
 - build/BassRack_artefacts/Release/Standalone/Bass Rack.app
 
-GitHub Actions builds a universal AU and uploads **BassRack-AU-universal**.
-The artifact is ad-hoc signed for development, not Developer ID signed or
-notarized for public distribution.
+GitHub Actions uploads **BassRack-macOS-Installers**, containing a .pkg installer
+and a .dmg with the same installer and short installation notes. Both contain
+the universal Apple Silicon + Intel AU. The pipeline installs the actual .pkg
+on the disposable macOS runner, verifies the installed bundle/signature and
+architectures, and runs Apple's auval on that installed component.
 
-Quit Logic before installation. Unzip the artifact, then copy Bass Rack.component
-into ~/Library/Audio/Plug-Ins/Components/ and reopen Logic.
-Check it in Logic's Plug-in Manager. For a command-line AU validation:
+### Install
+
+1. Download **BassRack-macOS-Installers** from the successful Actions run and
+   extract the GitHub artifact ZIP.
+2. Quit Logic. If you installed an earlier copy manually under
+   ~/Library/Audio/Plug-Ins/Components/, remove that older Bass Rack.component
+   to avoid duplicate installations.
+3. Open the .pkg directly, or open the .dmg and double-click the .pkg inside it.
+4. Follow macOS Installer. It installs into
+   /Library/Audio/Plug-Ins/Components/ for all users and requires administrator
+   authorization.
+5. Reopen Logic. Find **Audio Units → Crimson Audio → Bass Rack**.
+
+The AU is ad-hoc signed for development. The installer is unsigned and neither
+is notarized; macOS may require explicit approval in **System Settings →
+Privacy & Security**. A Developer ID signed/notarized distribution needs the
+owner's Apple Developer certificates and notarization credentials.
+
+To package a local build:
+
+    bash scripts/package-macos.sh
+
+The script produces .pkg, .dmg and SHA256SUMS.txt in build/installers/.
+It uses Apple's pkgbuild and hdiutil. The package has no pre/post-install scripts
+and disables bundle relocation so it always installs at the documented location.
+
+To uninstall, quit Logic and remove only
+/Library/Audio/Plug-Ins/Components/Bass Rack.component.
+Saved presets and third-party plugins remain in place.
+
+For a command-line AU validation:
 
     auval -v aufx BsRk Crsn
-
-If it fails, capture the auval output before trying to use it in a session.
 
 ## Portable DSP tests
 
