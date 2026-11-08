@@ -44,7 +44,7 @@ jobs:
           component="/Library/Audio/Plug-Ins/Components/Bass Rack.component"
           test -f "$component/Contents/Info.plist"
           codesign --verify --deep --strict "$component"
-          lipo -verify_arch arm64 x86_64 "$component/Contents/MacOS/Bass Rack"
+          lipo "$component/Contents/MacOS/Bass Rack" -verify_arch arm64 x86_64
           killall -9 AudioComponentRegistrar || true
           sleep 3
           auval -v aufx BsRk Crsn
