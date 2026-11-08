@@ -38,3 +38,10 @@ target_compile_definitions(BassRack PUBLIC
 target_link_libraries(BassRack PRIVATE
   juce::juce_audio_utils juce::juce_dsp
   PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
+
+option(BASSRACK_BUILD_PREVIEW "Build native editor screenshot utility" OFF)
+if(BASSRACK_BUILD_PREVIEW)
+  juce_add_console_app(BassRackPreview PRODUCT_NAME "BassRackPreview")
+  target_sources(BassRackPreview PRIVATE tools/CaptureEditor.cpp)
+  target_link_libraries(BassRackPreview PRIVATE BassRack juce::juce_audio_utils juce::juce_dsp)
+endif()

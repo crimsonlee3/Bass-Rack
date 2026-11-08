@@ -3,6 +3,8 @@ on:
   push:
     branches: [main]
   pull_request:
+    paths-ignore:
+      - 'docs/previews/**'
   workflow_dispatch:
 permissions:
   contents: read
