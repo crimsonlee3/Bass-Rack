@@ -12,9 +12,19 @@ destination="$stage/root/Library/Audio/Plug-Ins/Components"
 mkdir -p "$destination" "$output" "$stage/image"
 /usr/bin/ditto "$component" "$destination/Bass Rack.component"
 
-/usr/bin/pkgbuild --analyze --root "$stage/root" "$stage/components.plist"
-# Disable relocation to enforce the documented system location.
-/usr/libexec/PlistBuddy -c 'Set :0:BundleIsRelocatable false' "$stage/components.plist"
+# Audio Unit .component bundles are not inferred consistently by pkgbuild.
+# Declare the exact bundle and disable relocation/version skipping explicitly.
+cat > "$stage/components.plist" <<'COMPONENTS'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><array><dict>
+<key>RootRelativeBundlePath</key><string>Library/Audio/Plug-Ins/Components/Bass Rack.component</string>
+<key>BundleIsRelocatable</key><false/>
+<key>BundleIsVersionChecked</key><false/>
+<key>BundleHasStrictIdentifier</key><true/>
+<key>BundleOverwriteAction</key><string>upgrade</string>
+</dict></array></plist>
+COMPONENTS
 
 name="BassRack-$version-macOS-universal"
 package="$output/$name.pkg"
