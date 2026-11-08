@@ -43,6 +43,8 @@ AudioProcessorValueTreeState::ParameterLayout BassRackProcessor::parameters() {
     floating("threshold","Compressor threshold",-48,0,-12);floating("ratio","Compressor ratio",1,10,2);
     floating("attack","Compressor attack",.1f,100,15,.4f);floating("release","Compressor release",10,600,120,.5f);
     p.add(std::make_unique<AudioParameterBool>(ParameterID{"compress",1},"Master compressor",false));
+    p.add(std::make_unique<AudioParameterBool>(ParameterID{"stereoview",1},"Stereo analysis view",false));
+    p.add(std::make_unique<AudioParameterChoice>(ParameterID{"scopesource",1},"Stereo analysis source",StringArray{"Selected region","Master output"},0));
     floating("output","Output trim",-36,12,0);
     return p;
 }
@@ -123,20 +125,22 @@ AudioBuffer<float> BassRackProcessor::designRegion(int b,double sr)const {
 }
 void BassRackProcessor::loadRegion(int b,AudioBuffer<float> impulse,double sr) {
     AudioBuffer<float> copy;copy.makeCopyOf(impulse);
+    AudioBuffer<float> scopeCopy;scopeCopy.makeCopyOf(impulse);
     pre[b].loadImpulseResponse(std::move(impulse),sr,dsp::Convolution::Stereo::yes,dsp::Convolution::Trim::no,dsp::Convolution::Normalise::no);
     post[b].loadImpulseResponse(std::move(copy),sr,dsp::Convolution::Stereo::yes,dsp::Convolution::Trim::no,dsp::Convolution::Normalise::no);
+    scopeFilters[b].loadImpulseResponse(std::move(scopeCopy),sr,dsp::Convolution::Stereo::yes,dsp::Convolution::Trim::no,dsp::Convolution::Normalise::no);
 }
 void BassRackProcessor::prepareToPlay(double sr,int block) {
     const ScopedLock lock(graphLock);
     prepared=false;sampleRate=sr;blockSize=jmax(32,block);activeOS=-1;
     dsp::ProcessSpec spec{sr,static_cast<uint32>(blockSize),2};
-    original.setSize(2,blockSize);matching.setSize(2,blockSize);
+    original.setSize(2,blockSize);matching.setSize(2,blockSize);scopeRegion.setSize(2,blockSize);lastStereoRequest=0;
     dryAlignment.prepare();matchAlignment.prepare();autoLevel.prepare(sr);autoDb.store(0);
     for(int b=0;b<bands;++b) {
         audio[b].setSize(2,blockSize);reference[b].setSize(2,blockSize);
         wetAlignment[b].prepare();referenceAlignment[b].prepare();
         loadRegion(b,designRegion(b,sr),sr);filterDirty[b].store(false);
-        pre[b].prepare(spec);post[b].prepare(spec);
+        pre[b].prepare(spec);post[b].prepare(spec);scopeFilters[b].prepare(spec);
         for(int mode=1;mode<=4;++mode) {
             for(auto* bank:{&oversampling,&referenceOS}) {
                 (*bank)[b][mode]=std::make_unique<dsp::Oversampling<float>>(2,static_cast<size_t>(mode),
@@ -177,7 +181,7 @@ void BassRackProcessor::releaseResources() {
 void BassRackProcessor::reset() {
     const ScopedLock lock(graphLock);
     for(int b=0;b<bands;++b) {
-        pre[b].reset();post[b].reset();wetAlignment[b].reset();referenceAlignment[b].reset();
+        pre[b].reset();post[b].reset();scopeFilters[b].reset();wetAlignment[b].reset();referenceAlignment[b].reset();
         for(int m=1;m<=4;++m){if(oversampling[b][m])oversampling[b][m]->reset();if(referenceOS[b][m])referenceOS[b][m]->reset();}
         for(auto& d:dc[b])d.reset();
     }
@@ -235,9 +239,37 @@ int BassRackProcessor::readAnalyzer(float* destination,int maximum) {
     analyzerFifo.finishedRead(size1+size2);
     return size1+size2;
 }
+std::uint32_t BassRackProcessor::setStereoAnalysis(int source,bool enabled) {
+    const auto old=stereoRequest.load();
+    const auto mode=static_cast<std::uint32_t>(jlimit(0,5,source))|(enabled?8u:0u);
+    const auto next=(old&15u)==mode?old:((old&~15u)+16u)|mode;
+    stereoRequest.store(next);return next;
+}
+int BassRackProcessor::readStereoAnalysis(float* l,float* r,std::uint32_t* tags,int maximum) {
+    int a,n,b,m;stereoFifo.prepareToRead(maximum,a,n,b,m);
+    std::copy_n(stereoSamples[0].data()+a,n,l);std::copy_n(stereoSamples[1].data()+a,n,r);
+    std::copy_n(stereoTags.data()+a,n,tags);
+    std::copy_n(stereoSamples[0].data()+b,m,l+n);std::copy_n(stereoSamples[1].data()+b,m,r+n);
+    std::copy_n(stereoTags.data()+b,m,tags+n);stereoFifo.finishedRead(n+m);return n+m;
+}
+void BassRackProcessor::writeStereoAnalysis(const AudioBuffer<float>& buffer,std::uint32_t tag) {
+    int a,n,b,m;stereoFifo.prepareToWrite(buffer.getNumSamples(),a,n,b,m);
+    for(int channel=0;channel<2;++channel) {
+        std::copy_n(buffer.getReadPointer(channel),n,stereoSamples[channel].data()+a);
+        std::copy_n(buffer.getReadPointer(channel)+n,m,stereoSamples[channel].data()+b);
+    }
+    std::fill_n(stereoTags.data()+a,n,tag);std::fill_n(stereoTags.data()+b,m,tag);
+    stereoFifo.finishedWrite(n+m);
+}
 void BassRackProcessor::processChunk(AudioBuffer<float>& buffer) {
     selectOversampling(static_cast<int>(value("oversampling")));
     const int n=buffer.getNumSamples();bool solo=false;int maximum=0;
+    const auto scopeRequest=stereoRequest.load();
+    const bool showScope=(scopeRequest&8u)!=0;const int scopeSource=static_cast<int>(scopeRequest&7u);
+    if(scopeRequest!=lastStereoRequest) {
+        if(showScope&&scopeSource<bands)scopeFilters[scopeSource].reset();
+        lastStereoRequest=scopeRequest;
+    }
     for(int b=0;b<bands;++b)if(bandActive(b)){maximum=jmax(maximum,rackLatency(b));solo=solo||value(key(b,"solo"))>.5f;}
     const int baseDelay=2*regionDelay+osLatency+maximum;
     if(baseDelay+rackLatency(master)>=bassrack::StereoDelay::capacity){buffer.clear();return;}
@@ -275,6 +307,7 @@ void BassRackProcessor::processChunk(AudioBuffer<float>& buffer) {
         processRack(b,wet);
         wetAlignment[b].process(wetChannels[0],wetChannels[1],n,maximum-rackLatency(b));
         referenceAlignment[b].process(refChannels[0],refChannels[1],n,maximum);
+        const bool capture=showScope&&scopeSource==b;
         for(int i=0;i<n;++i) {
             float l=wetChannels[0][i],r=wetChannels[1][i];
             bassrack::image(l,r,c.width.getNextValue(),c.pan.getNextValue());
@@ -282,11 +315,18 @@ void BassRackProcessor::processChunk(AudioBuffer<float>& buffer) {
             const bool selected=value(key(b,"solo"))>.5f;
             for(int ch=0;ch<2;++ch) {
                 const float reference=refChannels[ch][i],processed=(ch==0?l:r)*gain;
+                if(capture)scopeRegion.setSample(ch,i,(solo&&!selected)?0.f:(bypass?reference:processed));
                 float result=bypass?reference:processed;
                 if(solo)result=selected?result:0;
                 else result=bypass?0:result-reference;
                 wetChannels[ch][i]=result;
             }
+        }
+        if(capture) {
+            float* channels[]{scopeRegion.getWritePointer(0),scopeRegion.getWritePointer(1)};
+            AudioBuffer<float> scoped(channels,2,n);
+            dsp::AudioBlock<float> block(scoped);dsp::ProcessContextReplacing<float> scopeContext(block);
+            scopeFilters[b].process(scopeContext);writeStereoAnalysis(scoped,scopeRequest);
         }
         // Re-filter only the change, so generated harmonics remain local to the region.
         dsp::ProcessContextReplacing<float> postContext(wetBlock);post[b].process(postContext);
@@ -307,6 +347,7 @@ void BassRackProcessor::processChunk(AudioBuffer<float>& buffer) {
         const float gain=compensation*output.getNextValue();
         for(int ch=0;ch<2;++ch){const float v=buffer.getSample(ch,i)*gain;buffer.setSample(ch,i,std::isfinite(v)?v:0);}
     }
+    if(showScope&&scopeSource==master)writeStereoAnalysis(buffer,scopeRequest);
     autoDb.store(autoLevel.db());updateLatency();
 }
 double BassRackProcessor::getTailLengthSeconds() const {

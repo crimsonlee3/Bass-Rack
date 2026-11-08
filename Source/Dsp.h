@@ -157,3 +157,16 @@ inline bool effectAUIdentifier(const std::string& identifier) {
     return (code=="aufx"||code=="aumf") && identifier.size()>pos+5 && identifier[pos+5]==',';
 }
 }
+
+namespace bassrack {
+inline std::array<float,2> midSide(float l,float r) {
+    return {(l+r)*.7071067811865475f,(l-r)*.7071067811865475f};
+}
+inline float stereoCorrelation(double ll,double rr,double lr) {
+    if(ll<=1.e-20||rr<=1.e-20)return 0;
+    return static_cast<float>(std::clamp(lr/std::sqrt(ll*rr),-1.,1.));
+}
+inline float sideEnergyShare(double mid,double side) {
+    return mid+side>1.e-20?static_cast<float>(std::clamp(side/(mid+side),0.,1.)):0.f;
+}
+}

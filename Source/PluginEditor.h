@@ -50,6 +50,35 @@ private:
     private:
         BassRackEditor& editor;
     };
+    class StereoScope final : public juce::Component {
+    public:
+        explicit StereoScope(BassRackEditor&);
+        void paint(juce::Graphics&)override;
+        void resized()override;
+        void update(int source,bool enabled);
+        const std::array<float,256>& midSpectrum()const{return midDb;}
+        const std::array<float,256>& sideSpectrum()const{return sideDb;}
+        bool active()const{return displaying;}
+    private:
+        BassRackEditor& editor;
+        juce::ComboBox target;
+        std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> targetAttachment;
+        juce::dsp::FFT fft{12};
+        juce::dsp::WindowingFunction<float> window{4096,juce::dsp::WindowingFunction<float>::hann};
+        std::array<float,4096> midSamples{},sideSamples{};
+        std::array<float,8192> midFFT{},sideFFT{};
+        std::array<float,256> midDb{},sideDb{};
+        std::array<juce::Point<float>,512> trace{};
+        std::array<float,512> age{};
+        std::array<float,3> sidePower{},totalPower{};
+        std::uint32_t request=0;
+        int filled=0,tracePosition=0,decimate=0,source=5;
+        bool displaying=false;
+        double ll=0,rr=0,lr=0;
+        float peak=.03f;
+        void resetDisplay();
+        void transform();
+    };
     struct Knob final : juce::Component {
         juce::Slider slider;
         juce::Label label;
@@ -62,6 +91,7 @@ private:
     RackLook look;
     BandMap map;
     TransferCurve transfer;
+    StereoScope stereoScope;
     int selected=0;
     std::array<juce::TextButton,5> bandButtons;
     juce::TextButton masterButton{"MASTER"},addButton{"+"},removeButton{"-"},
@@ -69,7 +99,8 @@ private:
     juce::ComboBox presets,type,slope,oversamplingChoice;
     juce::Slider frequencyControl,qControl;
     juce::TextButton deleteButton{"DELETE REGION"};
-    juce::ToggleButton autoGain{"AUTO GAIN"};
+    juce::ToggleButton autoGain{"AUTO GAIN"},stereoView{"STEREO VIEW"};
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> stereoViewAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> frequencyAttachment,qAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> slopeAttachment,osAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> autoAttachment;

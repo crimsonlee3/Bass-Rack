@@ -90,7 +90,7 @@ void BassRackEditor::Knob::resized() {
     auto r=getLocalBounds();label.setBounds(r.removeFromTop(24));slider.setBounds(r);
 }
 Colour BassRackEditor::selectedColour() const {return selected==BassRackProcessor::master?accent:colours[static_cast<size_t>(selected)];}
-BassRackEditor::BassRackEditor(BassRackProcessor& p):AudioProcessorEditor(p),processor(p),map(*this),transfer(*this) {
+BassRackEditor::BassRackEditor(BassRackProcessor& p):AudioProcessorEditor(p),processor(p),map(*this),transfer(*this),stereoScope(*this) {
     look.setColour(ResizableWindow::backgroundColourId,background);
     look.setColour(TextButton::textColourOnId,accent);
     look.setColour(ComboBox::textColourId,text);
@@ -102,6 +102,9 @@ BassRackEditor::BassRackEditor(BassRackProcessor& p):AudioProcessorEditor(p),pro
     for(auto* label:{&title,&subtitle,&insertTitle,&statusLabel,&selectionTitle})addAndMakeVisible(*label);
     labelStyle(insertTitle,10,muted);labelStyle(statusLabel,10,muted);labelStyle(selectionTitle,12,text);
     addAndMakeVisible(map);addAndMakeVisible(transfer);
+    addChildComponent(stereoScope);addAndMakeVisible(stereoView);
+    stereoViewAttachment=std::make_unique<AudioProcessorValueTreeState::ButtonAttachment>(processor.state,"stereoview",stereoView);
+    stereoView.setTooltip("Show/hide stereo scope, correlation and frequency-resolved mid/side analysis. This does not change audio.");
     for(int b=0;b<5;++b) {
         auto& button=bandButtons[static_cast<size_t>(b)];
         button.setButtonText("0"+String(b+1));
@@ -151,7 +154,7 @@ BassRackEditor::BassRackEditor(BassRackProcessor& p):AudioProcessorEditor(p),pro
     setSize(1180,880);setResizable(true,true);setResizeLimits(1000,820,1600,1100);
     select(0);startTimerHz(30);
 }
-BassRackEditor::~BassRackEditor(){stopTimer();setLookAndFeel(nullptr);}
+BassRackEditor::~BassRackEditor(){stopTimer();processor.setStereoAnalysis(BassRackProcessor::master,false);setLookAndFeel(nullptr);}
 void BassRackEditor::select(int band) {
     selected=band;const bool master=selected==BassRackProcessor::master;
     frequencyAttachment.reset();qAttachment.reset();slopeAttachment.reset();
@@ -235,6 +238,10 @@ void BassRackEditor::timerCallback() {
     addButton.setEnabled(active<5);removeButton.setEnabled(selected!=BassRackProcessor::master);
     for(int i=0;i<3;++i)inserts[static_cast<size_t>(i)].setButtonText("0"+String(i+1)+" / "+processor.slotName(selected,i));
     statusLabel.setText(processor.status()+" / "+String(processor.getLatencySamples())+" samples / AUTO "+String(processor.autoGainDb(),1)+" dB",dontSendNotification);
+    const bool showStereo=processor.value("stereoview")>.5f;
+    if(stereoScope.isVisible()!=showStereo){stereoScope.setVisible(showStereo);resized();}
+    const int scopeSource=processor.value("scopesource")>.5f?BassRackProcessor::master:selected;
+    stereoScope.update(scopeSource,showStereo);
     map.updateSpectrum();map.repaint();transfer.repaint();
 }
 void BassRackEditor::paint(Graphics& g) {
@@ -256,7 +263,7 @@ void BassRackEditor::paint(Graphics& g) {
     g.drawText("Double-click to create a region. Drag nodes for frequency/level. Scroll over a node for Q. Drag its edges for width.",
         28,static_cast<int>(controls-28),getWidth()-56,20,Justification::centredLeft);
     g.setColour(Colour(0xff687276));g.setFont(font(9.5f,true));
-    g.drawText("LINEAR PHASE / INDEPENDENT REGIONS / 0.3.0",getWidth()-390,getHeight()-35,362,18,Justification::centredRight);
+    g.drawText("LINEAR PHASE / STEREO ANALYSIS / 0.4.0",getWidth()-390,getHeight()-35,362,18,Justification::centredRight);
 }
 void BassRackEditor::resized() {
     const int w=getWidth(),c=getHeight()-426;
@@ -266,7 +273,11 @@ void BassRackEditor::resized() {
     for(int b=0;b<5;++b)bandButtons[static_cast<size_t>(b)].setBounds(26+b*58,90,50,28);
     addButton.setBounds(328,90,30,28);removeButton.setBounds(366,90,30,28);
     oversamplingChoice.setBounds(420,90,126,28);autoGain.setBounds(562,90,126,28);
-    masterButton.setBounds(w-136,90,108,28);map.setBounds(24,130,w-48,c-164);
+    stereoView.setBounds(704,90,142,28);
+    masterButton.setBounds(w-136,90,108,28);
+    const int scopeWidth=processor.value("stereoview")>.5f?290:0;
+    map.setBounds(24,130,w-48-(scopeWidth>0?scopeWidth+12:0),c-164);
+    stereoScope.setBounds(w-24-290,130,290,c-164);
     const bool master=selected==BassRackProcessor::master;
     type.setBounds(42,c+43,182,31);transfer.setBounds(42,c+112,182,132);
     selectionTitle.setBounds(master?42:260,c+10,master?420:340,24);
@@ -350,10 +361,12 @@ void BassRackEditor::BandMap::paint(Graphics& g) {
     g.setColour(Colour(0xff14181a));g.fillRoundedRectangle(getLocalBounds().toFloat(),7);
     g.setColour(edge);g.drawRoundedRectangle(getLocalBounds().toFloat().reduced(.5f),7,.8f);
     g.setFont(font(9.5f,true));g.setColour(muted);
-    g.drawText("INPUT SPECTRUM / INDEPENDENT PROCESSING REGIONS",16,9,350,16,Justification::centredLeft);
+    const bool stereo=editor.stereoScope.active();
+    g.drawText(stereo?"MID (WHITE) / SIDE (TEAL)":"INPUT SPECTRUM / INDEPENDENT PROCESSING REGIONS",
+        16,9,jmin(350,getWidth()-260),16,Justification::centredLeft);
     auto meter=[](float db){return db<=-99?String("-inf"):String(db,1);};
     g.drawText("IN "+meter(editor.processor.inputPeak())+"    /    OUT "+meter(editor.processor.outputPeak())+" dB",
-        getWidth()-350,9,330,16,Justification::centredRight);
+        getWidth()-240,9,224,16,Justification::centredRight);
     for(float hz:{20.f,50.f,100.f,200.f,500.f,1000.f,2000.f,5000.f,10000.f,20000.f}) {
         const float x=xFor(hz);
         g.setColour(Colour(0xff282e31));g.drawVerticalLine(static_cast<int>(x),r.getY(),r.getBottom());
@@ -367,14 +380,24 @@ void BassRackEditor::BandMap::paint(Graphics& g) {
         g.drawText(String(db,0),3,static_cast<int>(yFor(db)-7),30,14,Justification::centredRight);
     }
     g.saveState();g.reduceClipRegion(r.toNearestInt());
+    const auto& displayed=stereo?editor.stereoScope.midSpectrum():spectrum;
     Path spectrumLine;
     for(size_t i=0;i<spectrum.size();++i) {
-        const float x=r.getX()+r.getWidth()*static_cast<float>(i)/(spectrum.size()-1),y=yFor(spectrum[i]);
+        const float x=r.getX()+r.getWidth()*static_cast<float>(i)/(spectrum.size()-1),y=yFor(displayed[i]);
         if(i==0)spectrumLine.startNewSubPath(x,y);else spectrumLine.lineTo(x,y);
     }
     Path spectrumFill=spectrumLine;spectrumFill.lineTo(r.getBottomRight());spectrumFill.lineTo(r.getBottomLeft());spectrumFill.closeSubPath();
     g.setGradientFill(ColourGradient(Colour(0xffc2c9cc).withAlpha(.15f),0,r.getY(),Colours::transparentBlack,0,r.getBottom(),false));
     g.fillPath(spectrumFill);g.setColour(Colour(0xffc4cbce).withAlpha(.45f));g.strokePath(spectrumLine,PathStrokeType(1.1f));
+    if(stereo) {
+        const auto& sides=editor.stereoScope.sideSpectrum();
+        Path sideLine;
+        for(size_t i=0;i<sides.size();++i) {
+            const float x=r.getX()+r.getWidth()*static_cast<float>(i)/(sides.size()-1),y=yFor(sides[i]);
+            if(i==0)sideLine.startNewSubPath(x,y);else sideLine.lineTo(x,y);
+        }
+        g.setColour(Colour(0xff77cfc0).withAlpha(.9f));g.strokePath(sideLine,PathStrokeType(1.5f));
+    }
     for(int band=0;band<5;++band) {
         if(!editor.processor.bandActive(band))continue;
         const auto colour=colours[static_cast<size_t>(band)];
@@ -463,5 +486,127 @@ void BassRackEditor::BandMap::mouseWheelMove(const MouseEvent& e,const MouseWhee
     for(int b=0;b<5;++b)if(editor.processor.bandActive(b)&&e.position.getDistanceFrom(node(b))<25) {
         editor.processor.setParam(bandKey(b,"q"),jlimit(.2f,16.f,editor.processor.value(bandKey(b,"q"))*std::exp(wheel.deltaY*3)));
         editor.select(b);return;
+    }
+}
+
+BassRackEditor::StereoScope::StereoScope(BassRackEditor& e):editor(e) {
+    target.addItem("Selected region",1);target.addItem("Master output",2);addAndMakeVisible(target);
+    targetAttachment=std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment>(editor.processor.state,"scopesource",target);
+    target.setTooltip("Selected region: processed region after width and filtering, before master. Master: final output.");
+    resetDisplay();
+}
+void BassRackEditor::StereoScope::resized(){target.setBounds(12,29,getWidth()-24,25);}
+void BassRackEditor::StereoScope::resetDisplay() {
+    midDb.fill(-100);sideDb.fill(-100);age.fill(0);sidePower.fill(0);totalPower.fill(0);
+    filled=tracePosition=decimate=0;ll=rr=lr=0;peak=.03f;
+}
+void BassRackEditor::StereoScope::transform() {
+    std::copy(midSamples.begin(),midSamples.end(),midFFT.begin());
+    std::copy(sideSamples.begin(),sideSamples.end(),sideFFT.begin());
+    std::fill(midFFT.begin()+4096,midFFT.end(),0.f);std::fill(sideFFT.begin()+4096,sideFFT.end(),0.f);
+    window.multiplyWithWindowingTable(midFFT.data(),4096);window.multiplyWithWindowingTable(sideFFT.data(),4096);
+    fft.performFrequencyOnlyForwardTransform(midFFT.data());fft.performFrequencyOnlyForwardTransform(sideFFT.data());
+    const double rate=editor.processor.getSampleRate()>0?editor.processor.getSampleRate():48000;
+    for(size_t bin=0;bin<midDb.size();++bin) {
+        const double hz=20*std::pow(1000.,static_cast<double>(bin)/(midDb.size()-1));
+        const int index=jlimit(1,2047,static_cast<int>(hz*4096/rate));
+        midDb[bin]=jmax(Decibels::gainToDecibels(midFFT[static_cast<size_t>(index)]/1024.f,-100.f),midDb[bin]-2);
+        sideDb[bin]=jmax(Decibels::gainToDecibels(sideFFT[static_cast<size_t>(index)]/1024.f,-100.f),sideDb[bin]-2);
+    }
+    std::array<float,3> side{},total{};
+    for(int i=1;i<=2048;++i) {
+        const double hz=i*rate/4096;if(hz<20)continue;
+        const size_t band=hz<120?0:hz<2000?1:2;
+        const float m=midFFT[static_cast<size_t>(i)]/1024.f,s=sideFFT[static_cast<size_t>(i)]/1024.f;
+        side[band]+=s*s;total[band]+=m*m+s*s;
+    }
+    for(size_t i=0;i<3;++i){sidePower[i]=sidePower[i]*.65f+side[i]*.35f;totalPower[i]=totalPower[i]*.65f+total[i]*.35f;}
+}
+void BassRackEditor::StereoScope::update(int newSource,bool enabled) {
+    const auto token=editor.processor.setStereoAnalysis(newSource,enabled);
+    if(token!=request){resetDisplay();request=token;}
+    source=newSource;displaying=enabled;if(!enabled)return;
+    std::array<float,1024> left{},right{};std::array<std::uint32_t,1024> tags{};
+    double l2=0,r2=0,cross=0;int matched=0;
+    for(int batch=0;batch<8;++batch) {
+        const int n=editor.processor.readStereoAnalysis(left.data(),right.data(),tags.data(),1024);
+        if(n==0)break;
+        for(int i=0;i<n;++i) {
+            if(tags[static_cast<size_t>(i)]!=request)continue;
+            const float l=left[static_cast<size_t>(i)],r=right[static_cast<size_t>(i)];
+            const auto ms=bassrack::midSide(l,r);const float mid=ms[0],side=ms[1];
+            l2+=l*l;r2+=r*r;cross+=l*r;++matched;
+            peak=jmax(peak,std::abs(mid),std::abs(side));
+            midSamples[static_cast<size_t>(filled)]=mid;sideSamples[static_cast<size_t>(filled)]=side;
+            if(++filled==4096){
+                transform();
+                std::copy(midSamples.begin()+2048,midSamples.end(),midSamples.begin());
+                std::copy(sideSamples.begin()+2048,sideSamples.end(),sideSamples.begin());
+                filled=2048;
+            }
+            if(++decimate==8) {
+                decimate=0;trace[static_cast<size_t>(tracePosition)]={side,mid};age[static_cast<size_t>(tracePosition)]=1;
+                tracePosition=(tracePosition+1)%static_cast<int>(trace.size());
+            }
+        }
+    }
+    if(matched>0){l2/=matched;r2/=matched;cross/=matched;}
+    ll=ll*.82+l2*.18;rr=rr*.82+r2*.18;lr=lr*.82+cross*.18;
+    peak=jmax(.03f,peak*.97f);
+    for(auto& opacity:age)opacity*=.92f;
+    for(auto* values:{&midDb,&sideDb})for(auto& db:*values)db=jmax(-100.f,db-.4f);
+    if(matched==0)for(size_t i=0;i<3;++i){sidePower[i]*=.85f;totalPower[i]*=.85f;}
+    repaint();
+}
+void BassRackEditor::StereoScope::paint(Graphics& g) {
+    g.setColour(Colour(0xff14181a));g.fillRoundedRectangle(getLocalBounds().toFloat(),7);
+    g.setColour(edge);g.drawRoundedRectangle(getLocalBounds().toFloat().reduced(.5f),7,.8f);
+    g.setFont(font(9.5f,true));g.setColour(text);
+    g.drawText(source==BassRackProcessor::master?"MASTER / STEREO OUTPUT":"REGION 0"+String(source+1)+" / BEFORE MASTER",
+        12,7,getWidth()-24,16,Justification::centredLeft);
+    const float diameter=jmin(getWidth()-66.f,getHeight()-185.f);
+    const Point<float> centre(getWidth()*.5f,64+diameter*.5f);
+    const float radius=diameter*.5f;
+    g.setColour(Colour(0xff263136));
+    for(float ratio:{.5f,1.f})g.drawEllipse(centre.x-radius*ratio,centre.y-radius*ratio,diameter*ratio,diameter*ratio,.7f);
+    g.drawLine(centre.x-radius,centre.y,centre.x+radius,centre.y,.8f);
+    g.drawLine(centre.x,centre.y-radius,centre.x,centre.y+radius,.8f);
+    g.setColour(muted);g.setFont(font(8.5f));
+    g.drawText("MONO",static_cast<int>(centre.x-24),static_cast<int>(centre.y-radius-9),48,12,Justification::centred);
+    g.drawText("L",static_cast<int>(centre.x-radius-16),static_cast<int>(centre.y-radius*.65f),16,13,Justification::centred);
+    g.drawText("R",static_cast<int>(centre.x+radius),static_cast<int>(centre.y-radius*.65f),16,13,Justification::centred);
+    const auto colour=source==BassRackProcessor::master?accent:colours[static_cast<size_t>(source)];
+    for(size_t i=0;i<trace.size();++i)if(age[i]>.02f) {
+        const auto p=trace[i];const float scale=radius/(peak*1.15f);
+        const float x=centre.x-jlimit(-radius,radius,p.x*scale),y=centre.y-jlimit(-radius,radius,p.y*scale);
+        g.setColour(colour.withAlpha(age[i]*.55f));g.fillEllipse(x-1.1f,y-1.1f,2.2f,2.2f);
+    }
+    const int correlationY=getHeight()-100;
+    const bool signal=ll>1.e-10&&rr>1.e-10;
+    const float correlation=signal?bassrack::stereoCorrelation(ll,rr,lr):0;
+    g.setFont(font(8.5f));g.setColour(muted);
+    g.drawText("CORRELATION",12,correlationY-16,140,14,Justification::centredLeft);
+    g.setColour(signal?(correlation<0?Colour(0xffef9274):text):muted);
+    g.drawText(signal?String(correlation,2):"--",getWidth()-64,correlationY-16,52,14,Justification::centredRight);
+    Rectangle<float> bar(12,static_cast<float>(correlationY),getWidth()-24.f,5);
+    g.setGradientFill(ColourGradient(Colour(0xffc07259),bar.getX(),0,Colour(0xff77cfc0),bar.getRight(),0,false));
+    g.fillRoundedRectangle(bar,2);
+    const float marker=bar.getX()+(correlation+1)*.5f*bar.getWidth();
+    if(signal){g.setColour(text);g.fillRect(marker-1,bar.getY()-2,2.f,9.f);}
+    g.setFont(font(8));g.setColour(muted);
+    g.drawText("-1",12,correlationY+8,30,11,Justification::centredLeft);
+    g.drawText("+1",getWidth()-42,correlationY+8,30,11,Justification::centredRight);
+    g.setFont(font(8.5f,true));g.drawText("SIDE ENERGY BY FREQUENCY",12,getHeight()-69,getWidth()-24,13,Justification::centredLeft);
+    const char* labels[]{"LOW <120","MID 120-2k","HIGH >2k"};
+    const Colour tint[]{colours[0],colours[1],colours[3]};
+    for(size_t i=0;i<3;++i) {
+        const int y=getHeight()-51+static_cast<int>(i)*15;
+        const bool audible=totalPower[i]>1.e-9f;
+        const float share=audible?bassrack::sideEnergyShare(jmax(0.f,totalPower[i]-sidePower[i]),sidePower[i]):0;
+        g.setFont(font(8.5f));g.setColour(muted);g.drawText(labels[i],12,y,80,12,Justification::centredLeft);
+        const float width=getWidth()-140.f;
+        g.setColour(Colour(0xff30383c));g.fillRoundedRectangle(96,static_cast<float>(y+4),width,4,2);
+        if(share>0){g.setColour(tint[i]);g.fillRoundedRectangle(96,static_cast<float>(y+4),width*share,4,2);}
+        g.setColour(audible?text:muted);g.drawText(audible?String(roundToInt(share*100))+"%":"--",getWidth()-42,y,30,12,Justification::centredRight);
     }
 }

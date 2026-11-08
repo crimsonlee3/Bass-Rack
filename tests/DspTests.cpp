@@ -53,5 +53,17 @@ int main() {
     for(int i=0;i<48000*8;++i){float v=.2f*std::sin(static_cast<float>(2*pi*100*i/48000));correction=ag.process(v*v,4*v*v,true);}
     require(std::abs(correction-.5f)<.005,"automatic level matching");
     ag.reset();for(int i=0;i<10000;++i)require(ag.process(0,0,true)==1,"silent auto gain stability");
+    const auto monoMS=midSide(.5f,.5f),antiMS=midSide(.5f,-.5f),leftMS=midSide(.5f,0);
+    require(monoMS[1]==0,"mono must have zero side");
+    require(antiMS[0]==0,"anti-phase must have zero mid");
+    require(stereoCorrelation(1,1,1)==1,"mono correlation");
+    require(stereoCorrelation(1,1,-1)==-1,"anti-phase correlation");
+    require(stereoCorrelation(1,1,0)==0,"uncorrelated channels");
+    require(sideEnergyShare(monoMS[0]*monoMS[0],0)==0,"mono side energy");
+    require(sideEnergyShare(0,antiMS[1]*antiMS[1])==1,"anti-phase side energy");
+    require(std::abs(sideEnergyShare(leftMS[0]*leftMS[0],leftMS[1]*leftMS[1])-.5f)<1e-6,"hard-pan side share");
+    require(sideEnergyShare(0,0)==0,"silent side energy");
+    float ml=.1f,mr=.3f;image(ml,mr,0,0);
+    const auto narrow=midSide(ml,mr);require(narrow[1]==0,"width zero produces a mono scope");
     std::cout<<"DSP tests passed\n";
 }

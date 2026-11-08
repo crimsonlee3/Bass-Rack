@@ -1,4 +1,4 @@
-# Bass Rack 0.3.0
+# Bass Rack 0.4.0
 
 A macOS AU effect for Logic Pro with up to five independent frequency regions,
 stock distortion, per-region AU effects, stereo controls, master EQ/compression,
@@ -59,6 +59,43 @@ licensed and compatible with the architecture in which Logic runs.
 Scanning/loading is in-process: a broken third-party effect can still crash its
 host. Cancellation stops subsequent validations; an in-flight native creation
 cannot safely be forcibly terminated.
+
+## Stereo analysis / 0.4.0
+
+Turn **STEREO VIEW** on in the toolbar. The region graph narrows to make room
+for a stereo vectorscope, a signed correlation meter and frequency-resolved
+side-energy bars. The graph overlays **MID (white)** and **SIDE (teal)** spectra.
+
+The source selector chooses **Selected region** (follows the region being
+edited) or **Master output** (the complete processed 808/mix). A selected
+region is measured after its distortion, AU chain, width, pan, level and region
+filter, before master EQ/compression, master AUs, Auto Gain and output trim.
+Bypassed/muted/soloed regions are represented accordingly. Master output is
+measured after all processing and output gain.
+
+- A centred mono signal gives a vertical trace, +1 correlation and zero side.
+- Stereo differences spread the trace horizontally. Negative correlation
+  indicates opposite-polarity content. Silence or a missing channel shows "--".
+- LOW is 20-120 Hz, MID is 120 Hz-2 kHz, HIGH is above 2 kHz up to Nyquist.
+  Their bars show side energy as a percentage of mid-plus-side energy,
+  not the position of the width knob. 0% is mono, 50% is equal mid/side energy,
+  and 100% is pure anti-phase. Hard-panned mono can also produce 50%.
+  Frequency ranges with insufficient signal show "--".
+- The vectorscope uses a common auto-scale for both axes. Mid/side FFTs use
+  energy-preserving sqrt(2) normalization, so mono mid amplitude is 3 dB above
+  one original channel; this is a display convention and adds no audio gain.
+- The stereo FFT uses a 4096-sample Hann window with 50% overlap. It is a
+  measurement view, not an additional audio effect or stereoizer.
+
+Turn STEREO VIEW off to hide it and stop its stereo capture/FFT/scope filtering.
+The standard input spectrum and region editing remain available. Analysis
+settings are saved with the project/preset. The display also stops capturing
+when the editor closes. Switching sources discards queued samples from the old
+source, avoiding mixed-source traces. Audio capture uses a fixed stereo SPSC
+queue and never waits for the display.
+
+Native previews include a deterministic stereo test signal with a mono 55 Hz
+fundamental and increasing stereo differences in higher harmonics.
 
 ## Gain and oversampling
 

@@ -44,6 +44,8 @@ public:
     void deleteRegion(int);
     juce::String status()const;
     int readAnalyzer(float*,int);
+    std::uint32_t setStereoAnalysis(int source,bool enabled);
+    int readStereoAnalysis(float*,float*,std::uint32_t*,int);
     float inputPeak()const{return inputMeter.load();}
     float outputPeak()const{return outputMeter.load();}
     float autoGainDb()const{return autoDb.load();}
@@ -59,6 +61,14 @@ private:
         bool occupied()const{return description.name.isNotEmpty();}
     };
     std::array<std::array<Slot,slots>,racks> chains;
+    juce::AbstractFifo stereoFifo{8192};
+    std::array<std::array<float,8192>,2> stereoSamples{};
+    std::array<std::uint32_t,8192> stereoTags{};
+    std::atomic<std::uint32_t> stereoRequest{5};
+    std::uint32_t lastStereoRequest=0;
+    juce::AudioBuffer<float> scopeRegion;
+    std::array<juce::dsp::Convolution,bands> scopeFilters;
+    void writeStereoAnalysis(const juce::AudioBuffer<float>&,std::uint32_t);
     mutable juce::CriticalSection graphLock;
     juce::OwnedArray<juce::DocumentWindow> windows;
     juce::Component::SafePointer<juce::DocumentWindow> scannerWindow;

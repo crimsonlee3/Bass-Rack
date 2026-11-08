@@ -47,6 +47,7 @@ static void runEngineChecks(BassRackProcessor& processor) {
     for(int mode=0;mode<=4;++mode) {
         processor.factoryPreset(0);processor.setParam("oversampling",static_cast<float>(mode));
         processor.setRateAndBufferSizeDetails(48000,512);processor.prepareToPlay(48000,512);
+        const auto captureTag=processor.setStereoAnalysis(mode%2==0?0:BassRackProcessor::master,true);
         const int latency=processor.getLatencySamples();
         std::vector<float> input(total);float maximum=0;
         for(int start=0;start<total;start+=512) {
@@ -58,6 +59,17 @@ static void runEngineChecks(BassRackProcessor& processor) {
                 maximum=juce::jmax(maximum,std::abs(block.getSample(1,i)-input[start+i-latency]*.7f));
             }
         }
+        std::array<float,1024> left{},right{};std::array<std::uint32_t,1024> tags{};
+        int captured=0;
+        for(;;){
+            const int n=processor.readStereoAnalysis(left.data(),right.data(),tags.data(),1024);
+            if(n==0)break;captured+=n;
+            for(int i=0;i<n;++i)require(tags[i]==captureTag&&std::isfinite(left[i])&&std::isfinite(right[i]),"Stereo capture tag/data mismatch");
+        }
+        require(captured>0,"Stereo capture produced no samples");
+        processor.setStereoAnalysis(BassRackProcessor::master,false);
+        juce::AudioBuffer<float> silence(2,512);silence.clear();processor.processBlock(silence,midi);
+        require(processor.readStereoAnalysis(left.data(),right.data(),tags.data(),1024)==0,"Hidden stereo view still captured audio");
         require(maximum<2.e-5f,"Clean engine failed latency-aligned unity null test");
         std::cout<<"Unity/null OS "<<(1<<mode)<<"x: "<<maximum<<" / latency "<<latency<<"\n";
         processor.releaseResources();
@@ -104,6 +116,31 @@ static void runEngineChecks(BassRackProcessor& processor) {
     processor.releaseResources();processor.factoryPreset(0);
 }
 
+
+static void captureStereoUI(BassRackProcessor& processor,const juce::File& output,bool masterOutput) {
+    processor.factoryPreset(1);processor.setParam("stereoview",1);
+    processor.setParam("scopesource",masterOutput?1.f:0.f);processor.setParam("b0_width",1.7f);
+    processor.setRateAndBufferSizeDetails(48000,512);processor.prepareToPlay(48000,512);
+    std::array<float,1024> discarded{};
+    while(processor.readAnalyzer(discarded.data(),1024)>0){}
+    std::unique_ptr<juce::AudioProcessorEditor> editor(processor.createEditor());editor->setVisible(true);
+    auto* rack=dynamic_cast<BassRackEditor*>(editor.get());require(rack!=nullptr,"Stereo editor unavailable");
+    juce::AudioBuffer<float> audio(2,512);juce::MidiBuffer midi;
+    for(int block=0;block<120;++block) {
+        for(int i=0;i<512;++i) {
+            const double t=(block*512+i)/48000.;
+            const float l=static_cast<float>(.2*std::sin(2*bassrack::pi*55*t)+.055*std::sin(2*bassrack::pi*110*t)+.025*std::sin(2*bassrack::pi*220*t)+.012*std::sin(2*bassrack::pi*2400*t));
+            const float r=static_cast<float>(.2*std::sin(2*bassrack::pi*55*t)+.055*std::sin(2*bassrack::pi*110*t+.12)+.025*std::sin(2*bassrack::pi*220*t+.8)+.012*std::sin(2*bassrack::pi*2400*t+1.2));
+            audio.setSample(0,i,l);audio.setSample(1,i,r);
+        }
+        processor.processBlock(audio,midi);rack->refreshDisplay();
+    }
+    auto image=editor->createComponentSnapshot(editor->getLocalBounds(),true,1.5f);
+    juce::FileOutputStream stream(output);stream.setPosition(0);stream.truncate();
+    juce::PNGImageFormat png;require(png.writeImageToStream(image,stream),"Stereo screenshot failed");
+    std::cout<<output.getFileName()<<": stereo test tone / "<<image.getWidth()<<" x "<<image.getHeight()<<"\n";
+}
+
 int main(int argc,char** argv) {
     juce::ScopedJuceInitialiser_GUI gui;
     const auto folder=argc>1?juce::File(argv[1]):juce::File::getCurrentWorkingDirectory().getChildFile("previews");
@@ -118,6 +155,8 @@ int main(int argc,char** argv) {
 
     capture(processor,folder.getChildFile("bass-rack-five-bands.png"),false);
     capture(processor,folder.getChildFile("bass-rack-master.png"),true);
+    captureStereoUI(processor,folder.getChildFile("bass-rack-stereo-region.png"),false);
+    captureStereoUI(processor,folder.getChildFile("bass-rack-stereo-master.png"),true);
     processor.showScanner();
     for(int i=0;i<juce::Desktop::getInstance().getNumComponents();++i) {
         auto* window=dynamic_cast<juce::DocumentWindow*>(juce::Desktop::getInstance().getComponent(i));
