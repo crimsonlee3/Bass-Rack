@@ -2,6 +2,7 @@
 #include "../Source/EffectsScanner.h"
 #include <juce_gui_extra/juce_gui_extra.h>
 #include <iostream>
+#include <thread>
 
 static void capture(BassRackProcessor& processor,const juce::File& output,bool master) {
     processor.prepareToPlay(48000,512);
@@ -221,10 +222,119 @@ static void runRevisionChecks(BassRackProcessor& p) {
     p.factoryPreset(0);
 }
 
+
+struct BassRackTestAccess {
+    static uint64_t begin(BassRackProcessor& p,int slot) {
+        auto& s=p.chains[0][slot];s.loading=true;s.pendingName="Test replacement";return ++s.generation;
+    }
+    static void finish(BassRackProcessor& p,int slot,uint64_t gen,std::unique_ptr<juce::AudioPluginInstance> instance,
+        juce::String error={},uint64_t configOffset=0) {
+        juce::PluginDescription d;d.name="Lifecycle probe";d.fileOrIdentifier="AudioUnit:aufx,Test,CrSn";
+        p.finishPluginLoad(0,slot,gen,p.configurationGeneration+configOffset,48000,512,d,{},std::move(instance),error);
+    }
+    static void changeConfiguration(BassRackProcessor& p){const juce::ScopedLock lock(p.graphLock);++p.configurationGeneration;}
+    static bool unlocked(BassRackProcessor& p) {
+        bool ok=false;
+        std::thread worker([&]{ok=p.graphLock.tryEnter();if(ok)p.graphLock.exit();});worker.join();return ok;
+    }
+    static juce::AudioPluginInstance* instance(BassRackProcessor& p,int slot){return p.chains[0][slot].plugin.get();}
+};
+struct LifecycleProbe {
+    int prepares=0,releases=0,destroyed=0,editorsDestroyed=0;
+    bool lockFree=true,editorOrder=true,oldEditorAlive=true;
+    std::function<void()> onPrepare;
+};
+class LifecycleEffect final : public juce::AudioPluginInstance {
+public:
+    LifecycleEffect(BassRackProcessor& p,LifecycleProbe& s):AudioPluginInstance(BusesProperties()
+        .withInput("Input",juce::AudioChannelSet::stereo(),true)
+        .withOutput("Output",juce::AudioChannelSet::stereo(),true)),host(p),stats(s){}
+    ~LifecycleEffect()override{stats.editorOrder&=getActiveEditor()==nullptr;++stats.destroyed;}
+    void fillInPluginDescription(juce::PluginDescription& d)const override {
+        d.name="Lifecycle probe";d.fileOrIdentifier="AudioUnit:aufx,Test,CrSn";d.pluginFormatName="AudioUnit";
+    }
+    const juce::String getName()const override{return "Lifecycle probe";}
+    void prepareToPlay(double,int)override {
+        ++stats.prepares;stats.lockFree&=BassRackTestAccess::unlocked(host);if(stats.onPrepare)stats.onPrepare();
+    }
+    void releaseResources()override {
+        ++stats.releases;stats.lockFree&=BassRackTestAccess::unlocked(host);
+        stats.editorOrder&=getActiveEditor()==nullptr;
+    }
+    void processBlock(juce::AudioBuffer<float>&,juce::MidiBuffer&)override{}
+    bool isBusesLayoutSupported(const BusesLayout& l)const override {
+        return l.getMainInputChannelSet()==juce::AudioChannelSet::stereo()
+            &&l.getMainOutputChannelSet()==juce::AudioChannelSet::stereo();
+    }
+    bool acceptsMidi()const override{return false;}
+    bool producesMidi()const override{return false;}
+    double getTailLengthSeconds()const override{return 0;}
+    bool hasEditor()const override{return true;}
+    struct Editor final : juce::AudioProcessorEditor {
+        LifecycleProbe& stats;
+        Editor(LifecycleEffect& p):AudioProcessorEditor(p),stats(p.stats){setSize(240,100);}
+        ~Editor()override{++stats.editorsDestroyed;}
+    };
+    juce::AudioProcessorEditor* createEditor()override{return new Editor(*this);}
+    int getNumPrograms()override{return 1;}
+    int getCurrentProgram()override{return 0;}
+    void setCurrentProgram(int)override{}
+    const juce::String getProgramName(int)override{return {};}
+    void changeProgramName(int,const juce::String&)override{}
+    void getStateInformation(juce::MemoryBlock&)override{}
+    void setStateInformation(const void*,int)override{}
+private:
+    BassRackProcessor& host;LifecycleProbe& stats;
+};
+static void runHostingChecks() {
+    LifecycleProbe old,other,replacement,canceled,config,changedDuringPrepare;
+    BassRackProcessor p;
+    auto load=[&](int slot,LifecycleProbe& stats) {
+        auto gen=BassRackTestAccess::begin(p,slot);
+        BassRackTestAccess::finish(p,slot,gen,std::make_unique<LifecycleEffect>(p,stats));
+    };
+    load(0,old);load(1,other);
+    p.editPlugin(0,0);p.editPlugin(0,1);
+    juce::Component::SafePointer<juce::AudioProcessorEditor> oldEditor(BassRackTestAccess::instance(p,0)->getActiveEditor());
+    juce::Component::SafePointer<juce::AudioProcessorEditor> otherEditor(BassRackTestAccess::instance(p,1)->getActiveEditor());
+    auto* original=BassRackTestAccess::instance(p,0);
+    auto gen=BassRackTestAccess::begin(p,0);
+    BassRackTestAccess::finish(p,0,gen,nullptr,"Expected test failure");
+    require(BassRackTestAccess::instance(p,0)==original&&oldEditor!=nullptr&&otherEditor!=nullptr,
+        "Failed replacement removed current effect or an editor");
+    replacement.onPrepare=[&]{replacement.oldEditorAlive=oldEditor!=nullptr&&BassRackTestAccess::instance(p,0)==original;};
+    load(0,replacement);
+    require(replacement.oldEditorAlive&&oldEditor==nullptr&&otherEditor!=nullptr,
+        "Replacement closed unrelated editor or retired old effect before new effect prepared");
+    require(old.releases==1&&old.destroyed==1&&old.editorsDestroyed==1&&old.editorOrder&&old.lockFree,
+        "Old effect cleanup ran under graph lock or before editor cleanup");
+    gen=BassRackTestAccess::begin(p,0);p.removePlugin(0,0);
+    BassRackTestAccess::finish(p,0,gen,std::make_unique<LifecycleEffect>(p,canceled));
+    require(!BassRackTestAccess::instance(p,0)&&canceled.prepares==0&&canceled.destroyed==1,
+        "Canceled async completion resurrected removed effect");
+    gen=BassRackTestAccess::begin(p,0);
+    BassRackTestAccess::finish(p,0,gen,std::make_unique<LifecycleEffect>(p,config),{},1);
+    require(!BassRackTestAccess::instance(p,0)&&config.prepares==0&&config.destroyed==1,
+        "Obsolete audio configuration was accepted");
+    p.removePlugin(0,1);
+    require(otherEditor==nullptr&&other.editorOrder&&other.lockFree&&other.releases==1,
+        "Removal did not close its editor before releasing the AU");
+    require(replacement.prepares==1&&replacement.releases==1&&replacement.lockFree,
+        "Replacement was prepared more than once or held the graph lock");
+    changedDuringPrepare.onPrepare=[&]{BassRackTestAccess::changeConfiguration(p);};
+    load(0,changedDuringPrepare);
+    require(!BassRackTestAccess::instance(p,0)&&changedDuringPrepare.prepares==1
+        &&changedDuringPrepare.releases==1&&changedDuringPrepare.destroyed==1&&changedDuringPrepare.lockFree,
+        "Configuration change during prepare installed a stale effect or skipped cleanup");
+    for(const auto& d:p.known.getTypes())if(d.name=="Lifecycle probe")p.known.removeType(d);
+    std::cout<<"Hosting lifecycle: failure rollback, replacement/editor order, cancellation and configuration guards passed\n";
+}
+
 int main(int argc,char** argv) {
     juce::ScopedJuceInitialiser_GUI gui;
     const auto folder=argc>1?juce::File(argv[1]):juce::File::getCurrentWorkingDirectory().getChildFile("previews");
     BassRackProcessor processor;
+    runHostingChecks();
     runEngineChecks(processor);
     runRevisionChecks(processor);
     processor.factoryPreset(1);

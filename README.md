@@ -1,4 +1,24 @@
-# Bass Rack 0.5.0
+# Bass Rack 0.5.1
+
+## AU loading stability update
+
+A replacement is prepared outside the live audio graph lock. The existing insert
+and its editor remain available until the new effect is ready; a reported load
+failure leaves them intact. Removing or replacing an insert closes only its own
+editor, before releasing and destroying the old AU. Canceled callbacks and
+callbacks from an obsolete audio configuration cannot install an effect.
+
+Native lifecycle regression checks exercise replacement, failure rollback,
+editor destruction order, cancellation and configuration changes with test effects.
+They do not establish compatibility with Acustica Purple4AA. AU hosting still
+runs in-process: a native fault inside an effect can take down Logic.
+
+If an AU crashes while loading, inspect
+`~/Library/Application Support/BassRack/last-host-load.txt`.
+It records the most recent load stage, effect name/identifier/version and time,
+without audio or preset contents. In projects with multiple rack instances it
+describes the most recent operation across those instances.
+
 
 A Logic-compatible AU rack with independent frequency regions, stock distortion,
 AU insert hosting, stereo generation, Mid/Side processing, Auto Gain and Sub Protect.

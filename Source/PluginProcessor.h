@@ -117,6 +117,12 @@ private:
     void parameterChanged(const juce::String&,float)override;
     void restoreRack(juce::ValueTree);
     void closePluginWindows();
+    void closePluginEditor(juce::AudioPluginInstance*);
+    void tracePluginLoad(const juce::PluginDescription&,const juce::String&);
+    void finishPluginLoad(int,int,uint64_t,uint64_t,double,int,const juce::PluginDescription&,
+        const juce::MemoryBlock&,std::unique_ptr<juce::AudioPluginInstance>,const juce::String&);
+    uint64_t configurationGeneration=0;
+    friend struct BassRackTestAccess;
     void selectOversampling(int);
     juce::AudioBuffer<float> designRegion(int,double,bool hilbert=false)const;
     void loadRegion(int,juce::AudioBuffer<float>,double,juce::AudioBuffer<float> quad={});

@@ -169,7 +169,7 @@ void BassRackProcessor::loadSub(juce::AudioBuffer<float> impulse,double sr) {
 }
 void BassRackProcessor::prepareToPlay(double sr,int block) {
     const ScopedLock lock(graphLock);
-    prepared=false;sampleRate=sr;blockSize=jmax(32,block);activeOS=-1;
+    ++configurationGeneration;prepared=false;sampleRate=sr;blockSize=jmax(32,block);activeOS=-1;
     dsp::ProcessSpec spec{sr,static_cast<uint32>(blockSize),2};
     original.setSize(2,blockSize);matching.setSize(2,blockSize);scopeRegion.setSize(2,blockSize);monoWork.setSize(2,blockSize);lastStereoRequest=0;
     subOriginalBuffer.setSize(2,blockSize);subProcessedBuffer.setSize(2,blockSize);subAlignment.prepare(subDelay);loadSub(designSub(sr),sr);subOriginal.prepare(spec);subProcessed.prepare(spec);subDirty.store(false);
@@ -215,7 +215,7 @@ void BassRackProcessor::selectOversampling(int mode) {
     }
 }
 void BassRackProcessor::releaseResources() {
-    const ScopedLock lock(graphLock);prepared=false;
+    const ScopedLock lock(graphLock);++configurationGeneration;prepared=false;
     for(auto& rack:chains)for(auto& s:rack)if(s.plugin)s.plugin->releaseResources();
 }
 void BassRackProcessor::reset() {
@@ -436,44 +436,111 @@ void BassRackProcessor::loadPlugin(int rack,int slot,const PluginDescription& de
     if(!effectEligible(description)) {
         const ScopedLock lock(graphLock); message="Choose an audio effect other than Bass Rack."; return;
     }
-    uint64_t generation;
+    uint64_t generation,configuration;double rate;int size;
     {
-        const ScopedLock lock(graphLock); closePluginWindows();
+        const ScopedLock lock(graphLock);
         auto& s=chains[rack][slot]; generation=++s.generation;
+        configuration=configurationGeneration;rate=sampleRate;size=blockSize;
         s.pendingName=description.name;s.loading=true;
+        // Keep the current effect and its editor alive until a replacement is ready.
         if(!s.occupied()){s.description=description;s.saved=initial;}
         message="Loading "+description.name+"...";
     }
+    tracePluginLoad(description,"Create AU instance");
     WeakReference<BassRackProcessor> weak(this);
-    formats.createPluginInstanceAsync(description,sampleRate,blockSize,
-        [weak,rack,slot,generation,initial,description](std::unique_ptr<AudioPluginInstance> plugin,const String& error) {
-            if(weak==nullptr)return;
-            const ScopedLock lock(weak->graphLock);
-            auto& s=weak->chains[rack][slot];
-            if(s.generation!=generation)return;
-            s.loading=false;s.pendingName.clear();
-            if(!plugin) {weak->message="Could not load "+description.name+" - "+error;return;}
-            plugin->disableNonMainBuses();
-            auto layout=plugin->getBusesLayout();
-            if(layout.inputBuses.isEmpty() || layout.outputBuses.isEmpty()) {
-                weak->message="This effect has no stereo main input/output.";return;
-            }
-            layout.inputBuses.getReference(0)=AudioChannelSet::stereo();
-            layout.outputBuses.getReference(0)=AudioChannelSet::stereo();
-            if(!plugin->setBusesLayout(layout)) {weak->message="This effect does not support stereo.";return;}
-            if(initial.getSize()>0)plugin->setStateInformation(initial.getData(),static_cast<int>(initial.getSize()));
-            plugin->setRateAndBufferSizeDetails(weak->sampleRate,weak->blockSize);
-            plugin->prepareToPlay(weak->sampleRate,weak->blockSize);
-            s.plugin=std::move(plugin);s.description=s.plugin->getPluginDescription();s.saved=initial;
-            for(const auto& d:weak->known.getTypes())if(d.fileOrIdentifier==description.fileOrIdentifier)weak->known.removeType(d);
-            weak->known.addType(s.description);weak->message="Loaded "+s.description.name;
-            weak->updateLatency();
+    formats.createPluginInstanceAsync(description,rate,size,
+        [weak,rack,slot,generation,configuration,rate,size,initial,description](std::unique_ptr<AudioPluginInstance> plugin,const String& error) {
+            if(weak!=nullptr)weak->finishPluginLoad(rack,slot,generation,configuration,rate,size,
+                description,initial,std::move(plugin),error);
         });
 }
+void BassRackProcessor::finishPluginLoad(int rack,int slot,uint64_t generation,uint64_t configuration,
+    double rate,int size,const PluginDescription& description,const MemoryBlock& initial,
+    std::unique_ptr<AudioPluginInstance> plugin,const String& error) {
+    jassert(MessageManager::getInstance()->isThisTheMessageThread());
+    auto fail=[&](const String& detail) {
+        const ScopedLock lock(graphLock);auto& s=chains[rack][slot];
+        if(s.generation!=generation)return;
+        s.loading=false;s.pendingName.clear();
+        message="Could not load "+description.name+" - "+detail;
+    };
+    {
+        const ScopedLock lock(graphLock);
+        if(chains[rack][slot].generation!=generation)return;
+        if(configurationGeneration!=configuration){fail("Audio configuration changed; try again.");return;}
+    }
+    if(!plugin){fail(error);return;}
+    // Vendor initialization can be slow or re-enter host services. Never hold
+    // the live audio graph lock while configuring or preparing a new effect.
+    tracePluginLoad(description,"Configure buses");
+    plugin->disableNonMainBuses();
+    auto layout=plugin->getBusesLayout();
+    if(layout.inputBuses.isEmpty()||layout.outputBuses.isEmpty()) {
+        fail("This effect has no main input/output.");return;
+    }
+    layout.inputBuses.getReference(0)=AudioChannelSet::stereo();
+    layout.outputBuses.getReference(0)=AudioChannelSet::stereo();
+    if(!plugin->setBusesLayout(layout)){fail("This effect does not support stereo.");return;}
+    tracePluginLoad(description,"Restore AU state");
+    if(initial.getSize()>0)plugin->setStateInformation(initial.getData(),static_cast<int>(initial.getSize()));
+    plugin->setRateAndBufferSizeDetails(rate,size);
+    plugin->setNonRealtime(isNonRealtime());
+    tracePluginLoad(description,"Prepare AU");
+    plugin->prepareToPlay(rate,size);
+    auto actual=plugin->getPluginDescription();
+    std::unique_ptr<AudioPluginInstance> retired;
+    {
+        const ScopedLock lock(graphLock);
+        auto& s=chains[rack][slot];
+        if(s.generation!=generation||configurationGeneration!=configuration) {
+            if(s.generation==generation){s.loading=false;s.pendingName.clear();message="Audio configuration changed; try loading again.";}
+        } else {
+            retired=std::move(s.plugin);
+            s.plugin=std::move(plugin);s.description=actual;s.saved=initial;
+            s.loading=false;s.pendingName.clear();message="Loaded "+s.description.name;
+            updateLatency();
+        }
+    }
+    // Destroy only the replaced editor, before releasing/destroying its AU.
+    // Both operations stay outside the audio graph lock on the message thread.
+    if(retired) {
+        tracePluginLoad(description,"Close previous editor");
+        closePluginEditor(retired.get());
+        tracePluginLoad(description,"Release previous AU");
+        retired->releaseResources();
+        tracePluginLoad(description,"Destroy previous AU");
+        retired.reset();
+    }
+    if(plugin){plugin->releaseResources();return;} // stale prepared completion
+    for(const auto& d:known.getTypes())
+        if(d.fileOrIdentifier==description.fileOrIdentifier)known.removeType(d);
+    known.addType(actual);
+    tracePluginLoad(description,"Load completed");
+}
+void BassRackProcessor::tracePluginLoad(const PluginDescription& d,const String& stage) {
+    // A small local breadcrumb survives a native AU fault. No audio or preset
+    // state is recorded. This is diagnostic information, not crash isolation.
+    knownFile.getSiblingFile("last-host-load.txt").replaceWithText(
+        Time::getCurrentTime().toISO8601(true)+"\n"+stage+"\n"+d.name+
+        "\n"+d.fileOrIdentifier+"\n"+d.version+"\n");
+}
+void BassRackProcessor::closePluginEditor(AudioPluginInstance* plugin) {
+    if(!plugin)return;
+    auto* editor=plugin->getActiveEditor();
+    if(!editor)return;
+    for(int i=windows.size();--i>=0;)
+        if(windows[i]->getContentComponent()==editor)windows.remove(i);
+}
 void BassRackProcessor::removePlugin(int rack,int slot) {
-    const ScopedLock lock(graphLock); closePluginWindows();
-    auto& s=chains[rack][slot]; ++s.generation; s.plugin.reset();
-    s.description={}; s.saved.reset(); s.loading=false;s.pendingName.clear(); message="Insert removed"; updateLatency();
+    if(rack<0||rack>=racks||slot<0||slot>=slots)return;
+    std::unique_ptr<AudioPluginInstance> retired;
+    {
+        const ScopedLock lock(graphLock);
+        auto& s=chains[rack][slot];++s.generation;retired=std::move(s.plugin);
+        s.description={};s.saved.reset();s.loading=false;s.pendingName.clear();
+        message="Insert removed";updateLatency();
+    }
+    if(retired){closePluginEditor(retired.get());retired->releaseResources();}
 }
 String BassRackProcessor::slotName(int rack,int slot) const {
     const ScopedLock lock(graphLock); const auto& s=chains[rack][slot];
