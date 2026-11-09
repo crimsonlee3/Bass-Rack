@@ -42,7 +42,7 @@ package="$output/$name.pkg"
 
 /usr/bin/ditto "$package" "$stage/image/$name.pkg"
 cat > "$stage/image/Install Bass Rack.txt" <<'INSTRUCTIONS'
-Bass Rack 0.4.1 - development build
+Bass Rack 0.5.0 - development build
 
 1. Quit Logic Pro.
 2. Double-click the BassRack .pkg installer and follow the Installer prompts.

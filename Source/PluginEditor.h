@@ -35,7 +35,8 @@ private:
     private:
         BassRackEditor& editor;
         int dragging=-1,gainBand=-1,filled=0;
-        float dragGain=0,dragY=0;
+        float dragGain=0,dragY=0,fixedEdge=0;
+        bool draggingUpper=false;
         juce::dsp::FFT fft{11};
         juce::dsp::WindowingFunction<float> window{2048,juce::dsp::WindowingFunction<float>::hann};
         std::array<float,2048> samples{};
@@ -96,10 +97,13 @@ private:
     std::array<juce::TextButton,5> bandButtons;
     juce::TextButton masterButton{"MASTER"},addButton{"+"},removeButton{"-"},
         scanButton{"SCAN AUs"},saveButton{"SAVE"},loadButton{"LOAD"};
-    juce::ComboBox presets,type,slope,oversamplingChoice;
-    juce::Slider frequencyControl,qControl;
+    juce::ComboBox presets,type,slope,oversamplingChoice,channelMode,harmonicsMode;
+    juce::Slider frequencyControl,highControl,qControl,subCutoffControl;
     juce::TextButton deleteButton{"DELETE REGION"};
-    juce::ToggleButton autoGain{"AUTO GAIN"},stereoView{"STEREO VIEW"};
+    juce::ToggleButton autoGain{"AUTO GAIN"},stereoView{"STEREO VIEW"},stereoize{"STEREOIZE"},adaa{"ADAA"},subProtect{"SUB PROTECT"};
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> channelAttachment,harmonicsAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> stereoizeAttachment,adaaAttachment,subAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> subCutoffAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> stereoViewAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> frequencyAttachment,qAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> slopeAttachment,osAttachment;

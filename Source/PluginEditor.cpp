@@ -71,7 +71,7 @@ void BassRackEditor::Knob::bind(BassRackProcessor& p,const String& id,const Stri
     attachment.reset();label.setText(name,dontSendNotification);
     attachment=std::make_unique<AudioProcessorValueTreeState::SliderAttachment>(p.state,id,slider);
     slider.setTextValueSuffix("");
-    const bool percent=id.endsWith("mix")||id.endsWith("width"),pan=id.endsWith("pan");
+    const bool percent=id.endsWith("mix")||id.endsWith("width")||id.endsWith("depth"),pan=id.endsWith("pan");
     const bool time=id=="attack"||id=="release",ratio=id=="ratio";
     slider.textFromValueFunction=[percent,pan,time,ratio](double v) {
         if(percent)return String(roundToInt(v*100))+" %";
@@ -124,7 +124,7 @@ BassRackEditor::BassRackEditor(BassRackProcessor& p):AudioProcessorEditor(p),pro
     presets.setTooltip("Factory settings adjust stock controls and keep your AU inserts.");
     presets.onChange=[this]{if(presets.getSelectedId()>0){processor.factoryPreset(presets.getSelectedId()-1);select(0);}};
     addAndMakeVisible(presets);
-    for(int i=0;i<6;++i)type.addItem(StringArray{"Clean","Soft","Tube","Clip","Fold","Sine"}[i],i+1);
+    type.addItemList(StringArray{"Clean","Soft","Tube","Clip","Fold","Sine","Valve A","Valve B","Diode","Tape","Transformer","Console","FET Drive","Soft Diode","Hard Diode","Opto Drive"},1);
     addAndMakeVisible(type);
     for(auto* toggle:{&mute,&solo,&bypass,&compress})addAndMakeVisible(*toggle);
     for(auto& knob:knobs)addAndMakeVisible(knob);
@@ -141,10 +141,30 @@ BassRackEditor::BassRackEditor(BassRackProcessor& p):AudioProcessorEditor(p),pro
         chooser->launchAsync(FileBrowserComponent::openMode|FileBrowserComponent::canSelectFiles,
             [safe](const FileChooser& c){if(safe && c.getResult()!=File{})safe->processor.loadPreset(c.getResult());});
     };
-    for(auto* control:{&frequencyControl,&qControl}) {
+    for(auto* control:{&frequencyControl,&highControl,&qControl}) {
         control->setSliderStyle(Slider::LinearHorizontal);control->setTextBoxStyle(Slider::TextBoxRight,false,86,24);
         control->setColour(Slider::textBoxOutlineColourId,edge);addAndMakeVisible(*control);
     }
+    for(auto* control:{&frequencyControl,&highControl}) {
+        control->setRange(20,20000,.01);control->setSkewFactorFromMidPoint(1000);
+        control->textFromValueFunction=[](double hz){return hz>=1000?String(hz/1000,2)+" kHz":String(hz,1)+" Hz";};
+        control->valueFromTextFunction=[](const String& input){return input.getDoubleValue()*(input.containsIgnoreCase("k")?1000:1);};
+    }
+    frequencyControl.onValueChange=[this]{if(selected!=BassRackProcessor::master){auto e=processor.regionEdges(selected);processor.setRegionEdges(selected,static_cast<float>(frequencyControl.getValue()),e[1]);}};
+    highControl.onValueChange=[this]{if(selected!=BassRackProcessor::master){auto e=processor.regionEdges(selected);processor.setRegionEdges(selected,e[0],static_cast<float>(highControl.getValue()));}};
+    channelMode.addItemList(StringArray{"Stereo","Mid only","Side only"},1);addAndMakeVisible(channelMode);
+    harmonicsMode.addItemList(StringArray{"Natural harmonics","Contained harmonics"},1);addAndMakeVisible(harmonicsMode);
+    for(auto* toggle:{&stereoize,&adaa,&subProtect})addAndMakeVisible(*toggle);
+    adaaAttachment=std::make_unique<AudioProcessorValueTreeState::ButtonAttachment>(processor.state,"adaa",adaa);
+    subAttachment=std::make_unique<AudioProcessorValueTreeState::ButtonAttachment>(processor.state,"subprotect",subProtect);
+    adaa.setTooltip("Antiderivative anti-aliasing reduces nonlinear aliasing. Turn off and select 1x for raw aliasing.");
+    stereoize.setTooltip("In Stereo mode, Width above 100% creates quadrature side signal from mono. Depth sets the amount; mono sum is retained.");
+    addAndMakeVisible(subCutoffControl);subCutoffControl.setSliderStyle(Slider::LinearHorizontal);
+    subCutoffControl.setTextBoxStyle(Slider::TextBoxRight,false,82,24);
+    subCutoffAttachment=std::make_unique<AudioProcessorValueTreeState::SliderAttachment>(processor.state,"subcutoff",subCutoffControl);
+    subCutoffControl.textFromValueFunction=[](double v){return String(roundToInt(v))+" Hz";};subCutoffControl.setNumDecimalPlacesToDisplay(0);
+    subProtect.setTooltip("Restore original low-frequency Mid after master processing, before output trim. Cutoff is in MASTER. Stereo sides are retained.");
+    harmonicsMode.setTooltip("Natural lets generated harmonics out beyond the input region. Contained filters the processed change back into the region.");
     slope.addItemList(StringArray{"12 dB/oct","24 dB/oct","48 dB/oct","96 dB/oct"},1);addAndMakeVisible(slope);
     oversamplingChoice.addItemList(StringArray{"Off / 1x","2x","4x","8x","16x"},1);addAndMakeVisible(oversamplingChoice);
     osAttachment=std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment>(processor.state,"oversampling",oversamplingChoice);
@@ -157,12 +177,13 @@ BassRackEditor::BassRackEditor(BassRackProcessor& p):AudioProcessorEditor(p),pro
 BassRackEditor::~BassRackEditor(){stopTimer();processor.setStereoAnalysis(BassRackProcessor::master,false);setLookAndFeel(nullptr);}
 void BassRackEditor::select(int band) {
     selected=band;const bool master=selected==BassRackProcessor::master;
-    frequencyAttachment.reset();qAttachment.reset();slopeAttachment.reset();
-    frequencyControl.setVisible(!master);qControl.setVisible(!master);slope.setVisible(!master);deleteButton.setVisible(!master);
+    frequencyAttachment.reset();qAttachment.reset();slopeAttachment.reset();channelAttachment.reset();harmonicsAttachment.reset();stereoizeAttachment.reset();
+    frequencyControl.setVisible(!master);highControl.setVisible(!master);qControl.setVisible(!master);slope.setVisible(!master);deleteButton.setVisible(!master);
+    channelMode.setVisible(!master);harmonicsMode.setVisible(!master);stereoize.setVisible(!master);subCutoffControl.setVisible(master);
     typeAttachment.reset();muteAttachment.reset();soloAttachment.reset();bypassAttachment.reset();compressAttachment.reset();
     type.setVisible(!master);transfer.setVisible(!master);
     mute.setVisible(!master);solo.setVisible(!master);bypass.setVisible(!master);compress.setVisible(master);
-    for(auto& knob:knobs){knob.setVisible(true);knob.slider.setColour(Slider::rotarySliderFillColourId,selectedColour());}
+    for(auto& knob:knobs){knob.setVisible(true);knob.setEnabled(true);knob.slider.setColour(Slider::rotarySliderFillColourId,selectedColour());}
     for(auto* toggle:{&mute,&solo,&bypass,&compress})toggle->setColour(ToggleButton::tickColourId,selectedColour());
     if(master) {
         const char* ids[]{"bass","air","threshold","ratio","attack","release","output"};
@@ -171,17 +192,18 @@ void BassRackEditor::select(int band) {
         compressAttachment=std::make_unique<AudioProcessorValueTreeState::ButtonAttachment>(processor.state,"compress",compress);
         insertTitle.setText("MASTER FX CHAIN  /  AFTER EQ + COMPRESSION",dontSendNotification);
     } else {
-        const char* ids[]{"drive","mix","level","width","pan"};
-        const char* names[]{"DRIVE","DISTORTION MIX","BAND LEVEL","STEREO WIDTH","PAN"};
-        for(int i=0;i<5;++i)knobs[static_cast<size_t>(i)].bind(processor,bandKey(selected,ids[i]),names[i]);
-        knobs[5].setVisible(false);knobs[6].setVisible(false);
-        frequencyAttachment=std::make_unique<AudioProcessorValueTreeState::SliderAttachment>(processor.state,bandKey(band,"freq"),frequencyControl);
+        const char* ids[]{"drive","mix","level","width","depth","pan"};
+        const char* names[]{"DRIVE","DISTORTION MIX","BAND LEVEL","STEREO WIDTH","DEPTH","PAN"};
+        for(int i=0;i<6;++i)knobs[static_cast<size_t>(i)].bind(processor,bandKey(selected,ids[i]),names[i]);
+        knobs[6].setVisible(false);
+        channelAttachment=std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment>(processor.state,bandKey(band,"channel"),channelMode);
+        harmonicsAttachment=std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment>(processor.state,bandKey(band,"harmonics"),harmonicsMode);
+        stereoizeAttachment=std::make_unique<AudioProcessorValueTreeState::ButtonAttachment>(processor.state,bandKey(band,"stereoize"),stereoize);
         qAttachment=std::make_unique<AudioProcessorValueTreeState::SliderAttachment>(processor.state,bandKey(band,"q"),qControl);
-        frequencyControl.textFromValueFunction=[](double v){return String(v,1)+" Hz";};
-        frequencyControl.valueFromTextFunction=[](const String& v){return v.getDoubleValue();};
+
         qControl.textFromValueFunction=[](double v){return String(v,2);};
         qControl.valueFromTextFunction=[](const String& v){return v.getDoubleValue();};
-        frequencyControl.setNumDecimalPlacesToDisplay(1);qControl.setNumDecimalPlacesToDisplay(2);
+        qControl.setNumDecimalPlacesToDisplay(2);
         slopeAttachment=std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment>(processor.state,bandKey(band,"slope"),slope);
         typeAttachment=std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment>(processor.state,bandKey(band,"type"),type);
         muteAttachment=std::make_unique<AudioProcessorValueTreeState::ButtonAttachment>(processor.state,bandKey(band,"mute"),mute);
@@ -228,7 +250,15 @@ void BassRackEditor::insertMenu(int slot) {
 void BassRackEditor::timerCallback() {
     if(selected!=BassRackProcessor::master&&!processor.bandActive(selected)){select(BassRackProcessor::master);return;}
     if(selected==BassRackProcessor::master)selectionTitle.setText("MASTER / FINISH",dontSendNotification);
-    else selectionTitle.setText("REGION 0"+String(selected+1)+" / "+frequency(processor.value(bandKey(selected,"freq")))+" Hz",dontSendNotification);
+    else {
+        const auto e=processor.regionEdges(selected);
+        selectionTitle.setText("REGION 0"+String(selected+1)+" / "+frequency(e[0])+" - "+frequency(e[1])+" Hz",dontSendNotification);
+        if(!frequencyControl.isMouseButtonDown()&&!frequencyControl.hasKeyboardFocus(true))frequencyControl.setValue(e[0],dontSendNotification);
+        if(!highControl.isMouseButtonDown()&&!highControl.hasKeyboardFocus(true))highControl.setValue(e[1],dontSendNotification);
+        const bool stereo=processor.value(bandKey(selected,"channel"))<.5f&&processor.getTotalNumOutputChannels()>1;
+        stereoize.setEnabled(stereo);knobs[4].setEnabled(stereo);knobs[5].setEnabled(stereo);
+        knobs[3].setEnabled(processor.getTotalNumOutputChannels()>1&&processor.value(bandKey(selected,"channel"))!=1);
+    }
     selectionTitle.setColour(Label::textColourId,selectedColour());
     int active=0;
     for(int b=0;b<5;++b) {
@@ -237,7 +267,7 @@ void BassRackEditor::timerCallback() {
     }
     addButton.setEnabled(active<5);removeButton.setEnabled(selected!=BassRackProcessor::master);
     for(int i=0;i<3;++i)inserts[static_cast<size_t>(i)].setButtonText("0"+String(i+1)+" / "+processor.slotName(selected,i));
-    statusLabel.setText(processor.status()+" / "+String(processor.getLatencySamples())+" samples / AUTO "+String(processor.autoGainDb(),1)+" dB",dontSendNotification);
+    statusLabel.setText(processor.status()+" / "+String(processor.getLatencySamples())+" samples / AUTO "+String(processor.autoGainDb(),1)+" dB"+(processor.getTotalNumOutputChannels()==1?" / MONO OUTPUT":""),dontSendNotification);
     const bool showStereo=processor.value("stereoview")>.5f;
     if(stereoScope.isVisible()!=showStereo){stereoScope.setVisible(showStereo);resized();}
     const int scopeSource=processor.value("scopesource")>.5f?BassRackProcessor::master:selected;
@@ -253,40 +283,44 @@ void BassRackEditor::paint(Graphics& g) {
     if(selected!=BassRackProcessor::master) {
         g.setColour(edge);g.drawVerticalLine(244,controls+18,controls+252);
         g.setColour(muted);g.setFont(font(10,true));g.drawText("SHAPER",42,static_cast<int>(controls+12),160,20,Justification::centredLeft);
-        g.drawText("FREQUENCY",260,static_cast<int>(controls+40),150,16,Justification::centredLeft);
-        g.drawText("Q / BANDWIDTH",static_cast<int>(260+jmin(216.f,(getWidth()-500)*.28f)+18),static_cast<int>(controls+40),150,16,Justification::centredLeft);
-        g.drawText("SLOPE",static_cast<int>(260+jmin(216.f,(getWidth()-500)*.28f)+186),static_cast<int>(controls+40),120,16,Justification::centredLeft);
+        g.drawText("LOW EDGE",260,static_cast<int>(controls+40),150,16,Justification::centredLeft);
+        g.drawText("HIGH EDGE",static_cast<int>(260+jmin(176.f,(getWidth()-300)*.2f)+14),static_cast<int>(controls+40),150,16,Justification::centredLeft);
+        g.drawText("Q",static_cast<int>(260+2*jmin(176.f,(getWidth()-300)*.2f)+28),static_cast<int>(controls+40),120,16,Justification::centredLeft);
+        g.drawText("SLOPE",static_cast<int>(360+2*jmin(176.f,(getWidth()-300)*.2f)+28),static_cast<int>(controls+40),120,16,Justification::centredLeft);
+    } else {
+        g.setColour(muted);g.setFont(font(10,true));g.drawText("SUB PROTECT CUTOFF / ORIGINAL LOW MID",42,static_cast<int>(controls+44),420,16,Justification::centredLeft);
     }
     g.setColour(panel);g.fillRoundedRectangle(24,controls+286,getWidth()-48.f,88,8);
     g.setColour(edge);g.drawRoundedRectangle(24.5f,controls+286.5f,getWidth()-49.f,87,8,.8f);
     g.setColour(muted);g.setFont(font(10.5f));
-    g.drawText("Double-click to create a region. Drag nodes for frequency/level. Scroll over a node for Q. Drag its edges for width.",
+    g.drawText("Double-click for a region. Drag nodes to move it. Each edge moves independently; scroll a node for symmetric Q.",
         28,static_cast<int>(controls-28),getWidth()-56,20,Justification::centredLeft);
     g.setColour(Colour(0xff687276));g.setFont(font(9.5f,true));
-    g.drawText("LINEAR PHASE / STEREO ANALYSIS / "+String(JucePlugin_VersionString),getWidth()-390,getHeight()-35,362,18,Justification::centredRight);
+    g.drawText("NATURAL HARMONICS / STEREOIZE / "+String(JucePlugin_VersionString),getWidth()-390,getHeight()-35,362,18,Justification::centredRight);
 }
 void BassRackEditor::resized() {
     const int w=getWidth(),c=getHeight()-426;
     title.setBounds(26,15,240,30);subtitle.setBounds(28,45,280,18);
     presets.setBounds(w-630,22,242,32);scanButton.setBounds(w-372,22,124,32);
     saveButton.setBounds(w-236,22,96,32);loadButton.setBounds(w-128,22,100,32);
-    for(int b=0;b<5;++b)bandButtons[static_cast<size_t>(b)].setBounds(26+b*58,90,50,28);
-    addButton.setBounds(328,90,30,28);removeButton.setBounds(366,90,30,28);
-    oversamplingChoice.setBounds(420,90,126,28);autoGain.setBounds(562,90,126,28);
-    stereoView.setBounds(704,90,142,28);
+    for(int b=0;b<5;++b)bandButtons[static_cast<size_t>(b)].setBounds(26+b*48,90,40,28);
+    addButton.setBounds(274,90,28,28);removeButton.setBounds(310,90,28,28);
+    oversamplingChoice.setBounds(358,90,94,28);autoGain.setBounds(466,90,104,28);adaa.setBounds(280,25,78,28);subProtect.setBounds(718,90,124,28);
+    stereoView.setBounds(584,90,120,28);
     masterButton.setBounds(w-136,90,108,28);
     const int scopeWidth=processor.value("stereoview")>.5f?290:0;
     map.setBounds(24,130,w-48-(scopeWidth>0?scopeWidth+12:0),c-164);
     stereoScope.setBounds(w-24-290,130,290,c-164);
     const bool master=selected==BassRackProcessor::master;
     type.setBounds(42,c+43,182,31);transfer.setBounds(42,c+112,182,132);
-    selectionTitle.setBounds(master?42:260,c+10,master?420:340,24);
+    selectionTitle.setBounds(master?42:260,c+10,master?420:jmax(130,jmin(340,w-870)),24);
+    channelMode.setBounds(w-600,c+12,132,25);stereoize.setBounds(w-440,c+12,130,25);harmonicsMode.setBounds(42,c+81,182,25);subCutoffControl.setBounds(42,c+62,310,26);
     mute.setBounds(w-296,c+12,66,25);solo.setBounds(w-222,c+12,66,25);bypass.setBounds(w-148,c+12,104,25);
     compress.setBounds(w-200,c+12,156,25);
-    const int fw=jmin(216,static_cast<int>((w-500)*.28f)),qx=260+fw+18;
-    frequencyControl.setBounds(260,c+58,fw,26);qControl.setBounds(qx,c+58,150,26);slope.setBounds(qx+168,c+58,140,26);
+    const int fw=jmin(176,static_cast<int>((w-300)*.2f)),hx=260+fw+14,qx=hx+fw+14;
+    frequencyControl.setBounds(260,c+58,fw,26);highControl.setBounds(hx,c+58,fw,26);qControl.setBounds(qx,c+58,86,26);slope.setBounds(qx+100,c+58,130,26);
     deleteButton.setBounds(w-190,c+58,146,26);
-    const int n=master?7:5,left=master?40:258,kw=(w-left-40)/n;
+    const int n=master?7:6,left=master?40:258,kw=(w-left-40)/n;
     for(int i=0;i<n;++i)knobs[static_cast<size_t>(i)].setBounds(left+i*kw,c+103,kw-4,151);
     insertTitle.setBounds(42,c+293,w-84,20);
     const int iw=(w-104)/3;
@@ -307,13 +341,13 @@ void BassRackEditor::TransferCurve::paint(Graphics& g) {
     const float drive=editor.processor.value(bandKey(editor.selected,"drive"));
     Path line;
     for(int i=0;i<=160;++i) {
-        const float x=-1+i/80.f,y=jlimit(-1.2f,1.2f,bassrack::distort(x,drive,type));
+        const float x=-1+i/80.f,y=jlimit(-1.2f,1.2f,bassrack::staticCharacter(x,drive,type));
         const float px=plot.getX()+plot.getWidth()*i/160.f,py=cy-y*plot.getHeight()*.4f;
         if(i==0)line.startNewSubPath(px,py);else line.lineTo(px,py);
     }
     g.setColour(colour.withAlpha(.1f));g.strokePath(line,PathStrokeType(6));
     g.setColour(colour);g.strokePath(line,PathStrokeType(1.6f,PathStrokeType::curved));
-    g.setFont(font(8.5f));g.setColour(muted);g.drawText("TRANSFER CURVE",10,getHeight()-16,getWidth()-20,12,Justification::centredLeft);
+    g.setFont(font(8.5f));g.setColour(muted);g.drawText("STATIC CHARACTER",10,getHeight()-16,getWidth()-20,12,Justification::centredLeft);
 }
 BassRackEditor::BandMap::BandMap(BassRackEditor& e):editor(e){spectrum.fill(-100);setMouseCursor(MouseCursor::PointingHandCursor);}
 Rectangle<float> BassRackEditor::BandMap::plot() const {return {42,36,getWidth()-68.f,getHeight()-68.f};}
@@ -456,8 +490,9 @@ void BassRackEditor::BandMap::mouseDown(const MouseEvent& e) {
     if(editor.selected!=BassRackProcessor::master) {
         const int band=editor.selected;
         const auto edges=bassrack::regionEdges(editor.processor.value(bandKey(band,"freq")),editor.processor.value(bandKey(band,"q")));
-        for(double hz:edges)if(std::abs(e.position.x-xFor(static_cast<float>(hz)))<9) {
-            dragging=band;editor.processor.state.getParameter(bandKey(band,"q"))->beginChangeGesture();return;
+        for(int side=0;side<2;++side)if(std::abs(e.position.x-xFor(static_cast<float>(edges[side])))<9) {
+            dragging=band;draggingUpper=side==1;fixedEdge=static_cast<float>(edges[1-side]);
+            for(auto* id:{"freq","q"})editor.processor.state.getParameter(bandKey(band,id))->beginChangeGesture();return;
         }
     }
 }
@@ -470,14 +505,13 @@ void BassRackEditor::BandMap::mouseDrag(const MouseEvent& e) {
         level->setValueNotifyingHost(level->convertTo0to1(db));repaint();return;
     }
     if(dragging<0)return;
-    const double centre=editor.processor.value(bandKey(dragging,"freq")),edge=hzFor(e.position.x);
-    const double width=std::abs(edge-centre*centre/edge);
-    const float q=static_cast<float>(jlimit(.2,16.,centre/jmax(.01,width)));
-    auto* p=editor.processor.state.getParameter(bandKey(dragging,"q"));
-    p->setValueNotifyingHost(p->convertTo0to1(q));repaint();
+    const float edge=hzFor(e.position.x);
+    if(draggingUpper)editor.processor.setRegionEdges(dragging,fixedEdge,jmax(fixedEdge+1,edge),false);
+    else editor.processor.setRegionEdges(dragging,jmin(fixedEdge-1,edge),fixedEdge,false);
+    repaint();
 }
 void BassRackEditor::BandMap::mouseUp(const MouseEvent&) {
-    if(dragging>=0)editor.processor.state.getParameter(bandKey(dragging,"q"))->endChangeGesture();
+    if(dragging>=0)for(auto* id:{"freq","q"})editor.processor.state.getParameter(bandKey(dragging,id))->endChangeGesture();
     if(gainBand>=0)for(auto* id:{"level","freq"})editor.processor.state.getParameter(bandKey(gainBand,id))->endChangeGesture();
     dragging=gainBand=-1;
 }

@@ -65,5 +65,31 @@ int main() {
     require(sideEnergyShare(0,0)==0,"silent side energy");
     float ml=.1f,mr=.3f;image(ml,mr,0,0);
     const auto narrow=midSide(ml,mr);require(narrow[1]==0,"width zero produces a mono scope");
+    for(int shape=1;shape<=8;++shape)for(double x:{-2.31,-1.17,-.37,.19,.83,1.29,2.41}) {
+        const double h=1.e-5;
+        const double derivative=(ShapeADAA::primitive(x+h,shape)-ShapeADAA::primitive(x-h,shape))/(2*h);
+        require(std::abs(derivative-ShapeADAA::value(x,shape))<2.e-4,"ADAA primitive derivative mismatch");
+    }
+    for(int type=1;type<=15;++type)for(float drive:{0.f,24.f,60.f})for(bool aa:{false,true}) {
+        AnalogStage stage;stage.prepare(48000);
+        for(int i=0;i<6000;++i) {
+            const float x=.2f*std::sin(static_cast<float>(2*pi*913*i/48000));
+            const float y=stage.process(x,drive,type,aa);
+            require(std::isfinite(y)&&std::abs(y)<10,"analog stage unstable");
+        }
+    }
+    double rawAlias=0,aaAlias=0;
+    for(bool aa:{false,true}) {
+        ShapeADAA stage;double c2=0,s2=0,c18=0,s18=0;
+        for(int i=0;i<48000;++i) {
+            float y=stage.process(4*std::sin(2*pi*10000*i/48000),1,aa);
+            c2+=y*std::cos(2*pi*2000*i/48000);s2+=y*std::sin(2*pi*2000*i/48000);
+            c18+=y*std::cos(2*pi*18000*i/48000);s18+=y*std::sin(2*pi*18000*i/48000);
+        }
+        const double power=c2*c2+s2*s2+c18*c18+s18*s18;
+        if(aa)aaAlias=power;else rawAlias=power;
+    }
+    require(aaAlias<rawAlias*.8,"ADAA did not reduce test alias components");
+    std::cout<<"ADAA alias test improvement: "<<10*std::log10(rawAlias/aaAlias)<<" dB\n";
     std::cout<<"DSP tests passed\n";
 }

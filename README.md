@@ -1,182 +1,132 @@
-# Bass Rack 0.4.1
+# Bass Rack 0.5.0
 
-A macOS AU effect for Logic Pro with up to five independent frequency regions,
-stock distortion, per-region AU effects, stereo controls, master EQ/compression,
-Auto Gain and selectable oversampling. Development build.
+A Logic-compatible AU rack with independent frequency regions, stock distortion,
+AU insert hosting, stereo generation, Mid/Side processing, Auto Gain and Sub Protect.
 
-## Install
+## Install / channel configurations
 
-Download **BassRack-macOS-Installers** from a successful Actions run. Extract the
-GitHub artifact ZIP and run the .pkg, or open the .dmg and run its .pkg.
-Quit Logic first. Installer puts the AU into
-/Library/Audio/Plug-Ins/Components/ for all users and requires administrator
-authorization. Reopen Logic: **Audio Units > Crimson Audio > Bass Rack**.
+Download BassRack-macOS-Installers from the successful Actions run. Extract the
+artifact ZIP, quit Logic and run the PKG (directly or inside the DMG). Reopen Logic:
+Audio Units > Crimson Audio > Bass Rack. Installer writes the system Components
+folder. This development installer is unsigned and not notarized.
 
-The development PKG is unsigned/not notarized; the AU is ad-hoc signed. macOS
-may require approval in System Settings > Privacy & Security. If a prior manual
-copy is in ~/Library/Audio/Plug-Ins/Components/, remove that duplicate.
+The AU supports 1-in/1-out (Mono), 1-in/2-out (Mono->Stereo), and 2-in/2-out
+(Stereo). Logic offers the applicable choices for the channel strip. On a mono
+808 track, choose **Mono->Stereo** to hear newly generated spread. A true mono
+output cannot produce stereo; its width/stereoizer controls are disabled.
 
-## Independent regions
+## Stereoize / Depth
 
-Double-click the graph to create a region at that frequency. Up to five regions
-can be active, with gaps or overlaps. There is no linked crossover bank.
+The old width control multiplied existing side content, which did nothing to
+a mono source. **STEREOIZE** now generates a quadrature side signal from the
+processed Mid when Width exceeds 100%. DEPTH controls its amount. Width at
+100% remains unchanged, 0% collapses to mono, and values above 100% can create
+spread even from identical L/R input. Disable STEREOIZE for traditional M/S width.
 
-- Drag a numbered node horizontally for frequency and vertically for level.
-- Scroll over a node to change Q. Drag the selected region's two edges to
-  change its bandwidth while keeping its centre fixed.
-- Use FREQUENCY and Q for numeric edits. Choose 12, 24, 48 or 96 dB/oct slope.
-- DELETE REGION removes the selected region and its three AU inserts.
-- Muting attenuates that selected frequency region. Solo auditions its processed
-  region and temporarily pauses Auto Gain. Bypass contributes no region change.
-- Use the + slots/buttons to create regions; MASTER selects the finishing rack.
+The stereoizer uses a band-limited quadrature FIR path aligned within the existing
+region-filter delay. There is no pitch modulation, random wobble or added Haas
+delay. At centred pan, generated side is added with opposite signs to L/R, so
+it cancels in their mono sum. Master processing, Auto Gain and output trim can
+intentionally change that sum afterward. This is an original phase stereoizer,
+not an emulation of an Ozone algorithm or measured analog hardware.
 
-Each region has Clean / Soft / Tube / Clip / Fold / Sine, drive, distortion
-mix, level, stereo width (0% mono / 100% original / 200% wider) and pan.
+STEREO VIEW shows actual selected-region or final-output spread, correlation and
+frequency-resolved side energy. Its source selector and on/off state are saved.
+Turning it off or closing the editor stops additional analysis capture.
 
-The graph shows requested region selection/level responses, not the measured
-output of nonlinear processing or third-party effects. Regions are finite
-filters: extremely narrow low-frequency selections are limited by the 8193-tap
-FIR resolution, and overlaps combine the changes from each region.
+## Independent Low / High editing and Mid/Side
 
-## Scanner hotfix / 0.4.1
+Double-click the graph to create a region, up to five. Drag each boundary
+independently: moving the high edge does not move the low edge, and vice versa.
+LOW EDGE and HIGH EDGE accept numeric Hz or kHz entries (e.g. 200 and 2k).
+Dragging a numbered node moves the whole region and adjusts level. Scrolling a
+node or editing Q changes bandwidth symmetrically. Edges map internally to
+centre/Q; finite Q and FIR resolution limit extremely narrow selections.
 
-The default scanner now reads macOS AU registration metadata only and reuses
-cached entries. It never instantiates effect DSP during discovery, removing the
-in-process validation path that could take Logic down when a third-party effect
-crashed. Stereo compatibility is checked when an insert is actually loaded.
-Actual insert hosting is still in-process; this hotfix is not full crash isolation
-for faults during playback/loading. No in-process "validate all" option is offered.
+The region selector **Stereo / Mid only / Side only** routes the chosen
+component into stock distortion and AU effects. Mid-only processing preserves
+the original Side; Side-only preserves the original Mid. Stereoize works in
+Stereo mode. Pan is available in Stereo mode; Width also scales Side-only mode.
+Solo auditions the selected component of the processed region.
 
-## Effects-only AU discovery
+## Natural / Contained harmonics
 
-SCAN AUs opens a foreground metadata-only discovery window with progress,
-elapsed time, cache reuse and cancellation. Instruments (aumu), generators
-(augn), MIDI-only processors (aumi), mixers and outputs are excluded. Discovery
-enumerates only aufx/aumf registrations and does not instantiate effects.
+Natural harmonics selects the frequencies entering distortion and lets newly
+generated harmonics extend beyond that selection. This avoids forcing all
+distortion products through a second narrow band-pass. Contained harmonics
+retains the previous strict post-filtered behavior for localized processing.
+At extreme drive, any chosen region can still dominate the tonal balance.
 
-Stereo input/output compatibility is checked when an effect is loaded into an
-insert. Three serial AU slots are available per region and on the master.
-Effects must be installed, licensed and compatible with Logic's architecture.
-Hosting an inserted AU is still in-process; this scanner hotfix does not isolate
-faults in an effect during loading or playback. No in-process deep scan is used.
+## Sub Protect
 
-## Stereo analysis / 0.4.0
+SUB PROTECT restores the original low-frequency **Mid/centre** signal after
+distortion, insert chains, master EQ/compression and Auto Gain, before final output
+trim. The cutoff is in MASTER (default 80 Hz). It preserves bass weight while
+retaining generated stereo Side content, so width and a clean fundamental can coexist.
 
-Turn **STEREO VIEW** on in the toolbar. The region graph narrows to make room
-for a stereo vectorscope, a signed correlation meter and frequency-resolved
-side-energy bars. The graph overlays **MID (white)** and **SIDE (teal)** spectra.
+This is a phase-aligned parallel restoration: delayed processed stereo plus
+low-pass(original Mid) minus low-pass(processed Mid). The original centre is
+restored through the pass band and blends out above the cutoff. Final output
+trim still applies to everything. Protected low Mid bypasses master tonal/gain
+changes; disable protection if those changes are intentional.
 
-The source selector chooses **Selected region** (follows the region being
-edited) or **Master output** (the complete processed 808/mix). A selected
-region is measured after its distortion, AU chain, width, pan, level and region
-filter, before master EQ/compression, master AUs, Auto Gain and output trim.
-Bypassed/muted/soloed regions are represented accordingly. Master output is
-measured after all processing and output gain.
+Auto Gain measures the processed path before restoration. Restoring clean bass
+prioritizes bass weight over an exact final overall RMS match. A finite FIR
+transition exists around/above the cutoff.
 
-- A centred mono signal gives a vertical trace, +1 correlation and zero side.
-- Stereo differences spread the trace horizontally. Negative correlation
-  indicates opposite-polarity content. Silence or a missing channel shows "--".
-- LOW is 20-120 Hz, MID is 120 Hz-2 kHz, HIGH is above 2 kHz up to Nyquist.
-  Their bars show side energy as a percentage of mid-plus-side energy,
-  not the position of the width knob. 0% is mono, 50% is equal mid/side energy,
-  and 100% is pure anti-phase. Hard-panned mono can also produce 50%.
-  Frequency ranges with insufficient signal show "--".
-- The vectorscope uses a common auto-scale for both axes. Mid/side FFTs use
-  energy-preserving sqrt(2) normalization, so mono mid amplitude is 3 dB above
-  one original channel; this is a display convention and adds no audio gain.
-- The stereo FFT uses a 4096-sample Hann window with 50% overlap. It is a
-  measurement view, not an additional audio effect or stereoizer.
+Region filtering plus Sub Protect alignment contributes **10240 samples**
+fixed latency (~213 ms at 48 kHz), plus oversampling/AU latency. This is reported
+to Logic for compensation and is intended for mixing, not live monitoring.
 
-Turn STEREO VIEW off to hide it and stop its stereo capture/FFT/scope filtering.
-The standard input spectrum and region editing remain available. Analysis
-settings are saved with the project/preset. The display also stops capturing
-when the editor closes. Switching sources discards queued samples from the old
-source, avoiding mixed-source traces. Audio capture uses a fixed stereo SPSC
-queue and never waits for the display.
+## Distortion palette / anti-aliasing
 
-Native previews include a deterministic stereo test signal with a mono 55 Hz
-fundamental and increasing stereo differences in higher harmonics.
+Clean, Soft, Tube, Clip, Fold and Sine remain at their original indices.
+New original models are Valve A, Valve B, Diode, Tape, Transformer, Console,
+FET Drive, Soft Diode, Hard Diode and Opto Drive. Drive now reaches 60 dB.
 
-## Gain and oversampling
+These are **circuit-inspired approximations**, not calibrated Neve, SSL, Trident,
+1176, LA-2A, TS-808, RAT or other branded hardware emulations:
+- Valve models use cascaded biased stages, finite bandwidth and supply-envelope memory.
+- Diode models solve a normalized antiparallel Shockley diode/load equation.
+- Tape/Transformer include nonlinear magnetic-feedback memory and frequency shaping.
+- Console/FET/Opto models use distinct gain-stage curves, bandwidth and dynamic memory.
+- Soft/Hard Diode contrast emphasized feedback-style drive and hard rail/diode clipping.
+The static character preview omits time-dependent memory.
 
-A new clean instance uses **0 dB output trim**. The neutral output is the
-latency-aligned original signal; it does not inherit the previous -6 dB trim.
+**ADAA** enables first-order antiderivative antialiasing of nonlinear kernels,
+including an implicit diode antiderivative. It reduces aliasing; it cannot
+promise alias-free output for all inputs, dynamic states or discontinuities.
+Use it alongside selectable 1x/2x/4x/8x/16x oversampling for cleaner results.
+For deliberate raw aliasing, disable ADAA and select Off/1x. Higher modes cost CPU.
 
-AUTO GAIN matches smoothed stereo mean-square level after processing to input,
-before manual output trim. It is optional and bounded to approximately +/-12 dB.
-The applied correction is shown in the status line. It is not a perceptual LUFS
-meter, peak limiter, or guarantee against clipping. It pauses during solo and
-holds during silence.
+## Fast scanner and plugin compatibility
 
-Oversampling is selectable as **Off/1x, 2x, 4x, 8x or 16x**. It affects stock
-distortion; hosted AUs retain their own oversampling settings. All modes are
-prepared in advance. Changing it changes reported latency and resets the
-oversampling state; switch with playback stopped for clean transitions.
+Normal discovery reads macOS effect registration metadata and cached entries.
+It does not instantiate effects. Instruments/generators/MIDI-only units are
+excluded before discovery. Stereo compatibility validates on loading an insert.
+A failed replacement preserves the existing insert. Actual AU loading/playback
+is still in-process: a faulty loaded effect can still crash its host. No unsafe
+in-process deep-validation scan is offered.
 
-## Signal path and latency
+## Presets / testing / limits
 
-The original signal stays intact. Each active region extracts a linear-phase
-frequency selection, applies distortion/AU effects/stereo/level, subtracts its
-matched unprocessed reference, filters that change back into the region and
-adds it to the delayed original. This preserves a clean instance without
-crossover attenuation and keeps generated harmonics local to the selection.
+Projects and rack presets save the controls, AU identities and plugin state.
+Older projects retain Contained harmonics and traditional width until Stereoize
+is enabled. Older crossover projects migrate approximately; check migrated
+sessions by ear. New instances default to Natural harmonics, Stereoize enabled
+with neutral 100% Width, ADAA on and Sub Protect on.
 
-Two linear-phase region filters contribute **8192 samples** of fixed latency,
-plus stock oversampling and the longest active AU chain. Logic receives that
-latency for plugin delay compensation. At 48 kHz, the fixed part is about
-171 ms. This is a mixing effect, not a low-latency live-monitoring effect.
-Pre-ringing is possible with linear-phase filters.
+Build with CMake/JUCE 8.0.6 on macOS. Portable tests use -DBASSRACK_DSP_ONLY=ON.
+Native checks/previews use -DBASSRACK_BUILD_PREVIEW=ON, target BassRackPreview.
+The workflow builds universal AU/Standalone, creates PKG/DMG, installs the PKG,
+verifies both binary slices/signature and runs Apple auval.
 
-Regions sum into master bass/treble EQ, optional compressor, three AU inserts,
-Auto Gain and manual output trim. Region changes and wet references align to
-the longest active insert chain. The finite delay budget is 262143 samples.
+Native tests cover clean gain/OS modes, all three layouts, mono->stereo side
+creation and fold-down, Mid/Side isolation, one-sided edges, natural vs contained
+harmonics, heavy-drive sub restoration and Auto Gain/manual trim. Portable
+tests cover ADAA primitives, a measured alias-reduction case and model stability.
 
-## Presets and upgrades
-
-Save/Load preset stores region positions, Q/slope, stock controls, global
-settings, AU identities and full AU state. Logic project state saves the same.
-Factory settings change stock controls and preserve insert chains.
-
-Older 0.1/0.2 crossover presets are converted to independent centre/Q selections
-while preserving plugin slots and stock controls. This is approximate: the old
-full-spectrum crossover sum is no longer the processing model. Check migrated
-projects by ear. Their legacy default output trim is reset to 0 dB.
-
-## Build and verification
-
-Requires macOS, Xcode command-line tools and CMake. First configure fetches
-JUCE 8.0.6, which has its own license.
-
-    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-      '-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64' \
-      -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
-    cmake --build build --parallel 3
-    ctest --test-dir build --output-on-failure
-    bash scripts/package-macos.sh
-
-Portable DSP/filter/Auto Gain/scanner classification tests:
-
-    cmake -S . -B build-dsp -DBASSRACK_DSP_ONLY=ON
-    cmake --build build-dsp
-    ctest --test-dir build-dsp --output-on-failure
-
-The native preview tool additionally runs clean, latency-aligned unity/null
-tests at all five oversampling settings, then tests in-region gain and
-out-of-region preservation before rendering the actual editor with a bass test
-signal. Build with -DBASSRACK_BUILD_PREVIEW=ON and target BassRackPreview.
-
-Actions verifies actual PKG installation, DMG integrity, installed signature,
-both binary slices, DSP tests and Apple auval. Successful checks still do not
-replace listening/session tests in Logic or compatibility tests with your AUs.
-
-## Current limits
-
-No VST/instrument hosting, external sidechain, arbitrary module reordering,
-hosted-parameter automation lanes, Intel-only bridging, LUFS matching,
-brickwall limiting, production signing or notarization. Filter/region/insert
-and oversampling edits can produce transients; development playback/session
-testing is needed. Very high Q at sub frequencies has finite FIR resolution.
-Separate Intel runtime and third-party compatibility tests remain necessary.
-
-The UI and code are original. General FabFilter/iZotope workflow references
-do not include copied binaries, source, artwork or presets.
+Still requires listening and session testing in Logic with actual third-party
+AUs. Filter/region/model/OS changes can cause transients or pre-ringing. FIR
+resolution limits very narrow sub selections. No VST/instrument hosting, AU
+bridging, hosted-parameter automation or production signing/notarization.

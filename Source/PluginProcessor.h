@@ -42,6 +42,8 @@ public:
     bool bandActive(int b)const{return value("b"+juce::String(b)+"_active")>.5f;}
     int addRegion(float hz);
     void deleteRegion(int);
+    void setRegionEdges(int,float,float,bool gesture=true);
+    std::array<float,2> regionEdges(int)const;
     juce::String status()const;
     int readAnalyzer(float*,int);
     std::uint32_t setStereoAnalysis(int source,bool enabled);
@@ -56,6 +58,7 @@ private:
     struct Slot {
         std::unique_ptr<juce::AudioPluginInstance> plugin;
         juce::PluginDescription description;
+        juce::String pendingName;
         juce::MemoryBlock saved;
         bool loading=false;uint64_t generation=0;
         bool occupied()const{return description.name.isNotEmpty();}
@@ -77,14 +80,27 @@ private:
     std::array<float,8192> analyzerSamples{};
     std::atomic<float> inputMeter{-100},outputMeter{-100},autoDb{0};
     std::array<juce::AudioBuffer<float>,bands> audio,reference;
-    juce::AudioBuffer<float> original,matching;
+    juce::AudioBuffer<float> original,matching,monoWork;
+    std::array<juce::AudioBuffer<float>,bands> generated,natural;
+    std::array<bassrack::ShortStereoDelay,bands> naturalDelay,naturalScopeDelay;
+    std::array<juce::dsp::Convolution,bands> quadrature;
+    static constexpr int subDelay=2048,subIRSize=4097;
+    juce::dsp::Convolution subOriginal,subProcessed;
+    juce::AudioBuffer<float> subOriginalBuffer,subProcessedBuffer;
+    bassrack::ShortStereoDelay subAlignment;
+    juce::SmoothedValue<float> subBlend;
+    std::atomic<bool> subDirty{true};
+    juce::AudioBuffer<float> designSub(double)const;
+    void loadSub(juce::AudioBuffer<float>,double);
+    std::array<int,bands> generatedTail{};
+    std::array<std::array<bassrack::AnalogStage,2>,bands> analog;
     std::array<juce::dsp::Convolution,bands> pre,post;
     std::array<std::array<std::unique_ptr<juce::dsp::Oversampling<float>>,5>,bands> oversampling,referenceOS;
     std::array<bassrack::StereoDelay,bands> wetAlignment,referenceAlignment;
     bassrack::StereoDelay dryAlignment,matchAlignment;
     std::array<std::array<bassrack::DCBlock,2>,bands> dc;
     std::array<std::atomic<bool>,bands> filterDirty{};
-    struct Controls{juce::SmoothedValue<float> drive,mix,level,width,pan;};
+    struct Controls{juce::SmoothedValue<float> drive,mix,level,width,pan,depth;};
     std::array<Controls,bands> smooth;
     juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>,juce::dsp::IIR::Coefficients<float>> lowEQ,highEQ;
     juce::dsp::Compressor<float> compressor;
@@ -102,8 +118,8 @@ private:
     void restoreRack(juce::ValueTree);
     void closePluginWindows();
     void selectOversampling(int);
-    juce::AudioBuffer<float> designRegion(int,double)const;
-    void loadRegion(int,juce::AudioBuffer<float>,double);
+    juce::AudioBuffer<float> designRegion(int,double,bool hilbert=false)const;
+    void loadRegion(int,juce::AudioBuffer<float>,double,juce::AudioBuffer<float> quad={});
     JUCE_DECLARE_WEAK_REFERENCEABLE(BassRackProcessor)
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(BassRackProcessor)
 };

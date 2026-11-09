@@ -1,4 +1,5 @@
 #include "../Source/PluginEditor.h"
+#include "../Source/EffectsScanner.h"
 #include <juce_gui_extra/juce_gui_extra.h>
 #include <iostream>
 
@@ -37,6 +38,10 @@ static void capture(BassRackProcessor& processor,const juce::File& output,bool m
 
 static void require(bool ok,const char* message){if(!ok)throw std::runtime_error(message);}
 static void runEngineChecks(BassRackProcessor& processor) {
+    const double start=juce::Time::getMillisecondCounterHiRes();
+    const auto metadata=registeredEffects();
+    for(const auto& d:metadata)require(BassRackProcessor::effectEligible(d),"Metadata discovery included non-effect");
+    std::cout<<"Metadata-only discovery: "<<metadata.size()<<" effects / "<<juce::Time::getMillisecondCounterHiRes()-start<<" ms / zero instantiations\n";
     auto* format=processor.formats.getFormat(0);
     const auto candidates=format->searchPathsForPlugins({},false,true);
     require(!candidates.isEmpty(),"No registered effects found");
@@ -141,11 +146,87 @@ static void captureStereoUI(BassRackProcessor& processor,const juce::File& outpu
     std::cout<<output.getFileName()<<": stereo test tone / "<<image.getWidth()<<" x "<<image.getHeight()<<"\n";
 }
 
+
+static double component(const std::vector<float>& data,double hz) {
+    double c=0,s=0;
+    for(size_t i=0;i<data.size();++i){c+=data[i]*std::cos(2*bassrack::pi*hz*i/48000);s+=data[i]*std::sin(2*bassrack::pi*hz*i/48000);}
+    return 2*std::sqrt(c*c+s*s)/data.size();
+}
+static std::array<std::vector<float>,2> render(BassRackProcessor& p,double fm,double fs=0) {
+    p.setRateAndBufferSizeDetails(48000,512);p.prepareToPlay(48000,512);
+    std::array<std::vector<float>,2> result;juce::MidiBuffer midi;
+    for(int start=0;start<65536;start+=512) {
+        const int channels=p.getTotalNumOutputChannels();juce::AudioBuffer<float> audio(channels,512);
+        for(int i=0;i<512;++i) {
+            const float m=static_cast<float>(.12*std::sin(2*bassrack::pi*fm*(start+i)/48000));
+            const float s=static_cast<float>(fs>0?.035*std::sin(2*bassrack::pi*fs*(start+i)/48000):0);
+            audio.setSample(0,i,m+s);if(channels==2)audio.setSample(1,i,m-s);
+        }
+        p.processBlock(audio,midi);
+        if(start>=32768)for(int i=0;i<512;++i){result[0].push_back(audio.getSample(0,i));result[1].push_back(audio.getSample(channels==2?1:0,i));}
+    }
+    p.releaseResources();return result;
+}
+static void runRevisionChecks(BassRackProcessor& p) {
+    p.factoryPreset(0);
+    p.setRegionEdges(0,200,2000);
+    auto edges=p.regionEdges(0);require(std::abs(edges[0]-200)<.1&&std::abs(edges[1]-2000)<.1,"Independent edge setup failed");
+    p.setRegionEdges(0,edges[0],3000);edges=p.regionEdges(0);
+    require(std::abs(edges[0]-200)<.1&&std::abs(edges[1]-3000)<.1,"Moving high edge moved low edge");
+    p.setRegionEdges(0,350,edges[1]);edges=p.regionEdges(0);
+    require(std::abs(edges[0]-350)<.1&&std::abs(edges[1]-3000)<.1,"Moving low edge moved high edge");
+    std::cout<<"Independent edges: "<<edges[0]<<" - "<<edges[1]<<" Hz\n";
+    for(auto pair:std::array<std::pair<int,int>,3>{{{1,1},{1,2},{2,2}}}) {
+        auto layout=p.getBusesLayout();layout.inputBuses.getReference(0)=pair.first==1?juce::AudioChannelSet::mono():juce::AudioChannelSet::stereo();
+        layout.outputBuses.getReference(0)=pair.second==1?juce::AudioChannelSet::mono():juce::AudioChannelSet::stereo();
+        require(p.setBusesLayout(layout),"Requested Logic channel configuration unsupported");
+        p.factoryPreset(0);p.setParam("oversampling",0);p.setParam("b0_freq",330);p.setParam("b0_q",.7f);
+        p.setParam("b0_width",2);p.setParam("b0_depth",1);p.setParam("b0_stereoize",1);
+        auto output=render(p,330);
+        double mid=0,side=0,ll=0,rr=0,lr=0;std::vector<float> folded(output[0].size());
+        for(size_t i=0;i<output[0].size();++i){double l=output[0][i],r=output[1][i],m=(l+r)*.5,s=(l-r)*.5;mid+=m*m;side+=s*s;ll+=l*l;rr+=r*r;lr+=l*r;folded[i]=static_cast<float>(m);}
+        require(std::abs(20*std::log10(component(folded,330)/.12))<.15,"Stereoizer changed mono fold-down");
+        if(pair.second==1)require(side<1.e-20,"True mono output leaked sides");
+        else require(side/mid>.1&&bassrack::stereoCorrelation(ll,rr,lr)>-.03,"Mono source did not produce clean stereo spread");
+        std::cout<<"Layout "<<pair.first<<"->"<<pair.second<<" / side-mid "<<side/(mid+1.e-20)<<" / correlation "<<bassrack::stereoCorrelation(ll,rr,lr)<<"\n";
+    }
+    for(int mode=1;mode<=2;++mode) {
+        p.factoryPreset(0);p.setParam("oversampling",0);p.setParam("b0_freq",mode==1?330:1000);
+        p.setParam("b0_q",.2f);p.setParam("b0_level",6);p.setParam("b0_channel",static_cast<float>(mode));
+        auto out=render(p,330,1000);std::vector<float> mid(out[0].size()),side(mid.size());
+        for(size_t i=0;i<mid.size();++i){mid[i]=(out[0][i]+out[1][i])*.5f;side[i]=(out[0][i]-out[1][i])*.5f;}
+        const double mg=20*std::log10(component(mid,330)/.12),sg=20*std::log10(component(side,1000)/.035);
+        require(std::abs(mg-(mode==1?6:0))<.2&&std::abs(sg-(mode==2?6:0))<.2,"Mid/Side isolation failed");
+        std::cout<<"Channel mode "<<mode<<" / mid gain "<<mg<<" / side gain "<<sg<<" dB\n";
+    }
+    std::array<double,2> harmonic{};
+    for(int mode=0;mode<2;++mode) {
+        p.factoryPreset(0);p.setParam("subprotect",0);p.setParam("oversampling",0);
+        p.setParam("b0_freq",330);p.setParam("b0_q",4);p.setParam("b0_slope",2);
+        p.setParam("b0_type",3);p.setParam("b0_drive",24);p.setParam("b0_harmonics",static_cast<float>(mode));
+        auto out=render(p,330);harmonic[mode]=component(out[0],990);
+    }
+    require(harmonic[0]>harmonic[1]*10,"Natural harmonics remained boxed into band");
+    std::cout<<"Natural vs Contained 3rd harmonic: "<<20*std::log10(harmonic[0]/harmonic[1])<<" dB difference\n";
+    std::array<double,2> bass{};
+    for(int protect=0;protect<2;++protect) {
+        p.factoryPreset(0);p.setParam("oversampling",0);p.setParam("subprotect",static_cast<float>(protect));
+        p.setParam("b0_freq",55);p.setParam("b0_type",3);p.setParam("b0_drive",36);
+        auto out=render(p,55);std::vector<float> mid(out[0].size());
+        for(size_t i=0;i<mid.size();++i)mid[i]=(out[0][i]+out[1][i])*.5f;
+        bass[protect]=20*std::log10(component(mid,55)/.12);
+    }
+    require(std::abs(bass[1])<.35&&std::abs(bass[0])>3,"Sub Protect did not restore original fundamental");
+    std::cout<<"Sub Protect heavy-drive fundamental: off "<<bass[0]<<" / on "<<bass[1]<<" dB\n";
+    p.factoryPreset(0);
+}
+
 int main(int argc,char** argv) {
     juce::ScopedJuceInitialiser_GUI gui;
     const auto folder=argc>1?juce::File(argv[1]):juce::File::getCurrentWorkingDirectory().getChildFile("previews");
     BassRackProcessor processor;
     runEngineChecks(processor);
+    runRevisionChecks(processor);
     processor.factoryPreset(1);
     processor.setRateAndBufferSizeDetails(48000,512);
     processor.prepareToPlay(48000,512);

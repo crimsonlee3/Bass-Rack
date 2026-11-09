@@ -170,3 +170,142 @@ inline float sideEnergyShare(double mid,double side) {
     return mid+side>1.e-20?static_cast<float>(std::clamp(side/(mid+side),0.,1.)):0.f;
 }
 }
+
+namespace bassrack {
+struct ShapeADAA {
+    double previous=0,integral=0;int shape=-1;bool ready=false;
+    static double logCosh(double x){const double a=std::abs(x);return a+std::log1p(std::exp(-2*a))-std::log(2.);}
+    static double diode(double x) {
+        constexpr double k=.015,vt=.24;
+        double y=vt*std::asinh(x/k);
+        for(int i=0;i<8;++i) {
+            const double u=std::clamp(y/vt,-20.,20.);
+            y-=(y+k*std::sinh(u)-x)/(1+k/vt*std::cosh(u));
+        }
+        return y;
+    }
+    static double value(double x,int type) {
+        switch(type) {
+            case 1:return std::tanh(x);
+            case 2:return std::tanh(x+.18)-std::tanh(.18);
+            case 3:return std::clamp(x,-1.,1.);
+            case 4:{double t=std::fmod(x+1,4.);if(t<0)t+=4;return 1-std::abs(t-2);}
+            case 5:return std::sin(x);
+            case 6:return x/(1+std::abs(x));
+            case 7:return diode(x);
+            case 8:{const double y=1.5*std::tanh(x/1.5);return y-.18*y*y;}
+            default:return x;
+        }
+    }
+    static double primitive(double x,int type) {
+        switch(type) {
+            case 1:return logCosh(x);
+            case 2:return logCosh(x+.18)-std::tanh(.18)*x;
+            case 3:return std::abs(x)<=1?.5*x*x:std::abs(x)-.5;
+            case 4:{double t=std::fmod(x+1,4.);if(t<0)t+=4;return (t<=2?.5*t*t-t:3*t-.5*t*t-4)+.5;}
+            case 5:return 1-std::cos(x);
+            case 6:{const double a=std::abs(x);return a-std::log1p(a);}
+            case 7:{const double y=diode(x),u=std::clamp(y/.24,-20.,20.);return .5*y*y+.015*(y*std::sinh(u)-.24*(std::cosh(u)-1));}
+            case 8:return 2.25*logCosh(x/1.5)-.405*(x-1.5*std::tanh(x/1.5));
+            default:return .5*x*x;
+        }
+    }
+    void reset(){ready=false;shape=-1;previous=integral=0;}
+    float process(double x,int type,bool enabled) {
+        if(type!=shape){ready=false;shape=type;}
+        double y=value(x,type);
+        if(!enabled){previous=x;ready=false;return static_cast<float>(y);}
+        const double p=type==7?.5*y*y+.015*(y*std::sinh(y/.24)-.24*(std::cosh(y/.24)-1)):primitive(x,type);
+        const double difference=x-previous;
+        if(enabled&&ready)y=std::abs(difference)>1.e-5?(p-integral)/difference:value((x+previous)*.5,type);
+        previous=x;integral=p;ready=true;
+        return static_cast<float>(y);
+    }
+};
+struct AnalogStage {
+    ShapeADAA first,second;
+    double sr=48000,envelope=0,low=0,plate=0,flux=0,envRate=0,capRate=0,lowRate=0,fluxRate=0,softRate=0,hardRate=0;
+    void prepare(double rate) {
+        sr=rate;envRate=1-std::exp(-1/(sr*.035));
+        capRate=1-std::exp(-2*pi*18000/sr);lowRate=1-std::exp(-2*pi*500/sr);
+        fluxRate=1-std::exp(-1/(sr*.0004));
+        softRate=1-std::exp(-2*pi*7000/sr);hardRate=1-std::exp(-2*pi*6000/sr);reset();
+    }
+    void reset(){first.reset();second.reset();envelope=low=plate=flux=0;}
+    float process(float x,float drive,int type,bool adaa) {
+        if(type==0)return x;
+        const double v=std::clamp(static_cast<double>(x)*gain(drive),-2048.,2048.);
+        if(type<=5)return first.process(v,type,adaa);
+        envelope+=envRate*(std::min(8.,std::abs(v))-envelope);
+        low+=lowRate*(v-low);
+        double out=0;
+        if(type==6) { // two biased valve stages and finite plate capacitance
+            const double bias=.12-.08*envelope;
+            const double a=first.process(1.6*v+bias,2,adaa)-ShapeADAA::value(bias,2);
+            out=second.process(1.45*a+.06,2,adaa)-ShapeADAA::value(.06,2);
+        } else if(type==7) { // harder odd-harmonic stages with supply sag
+            const double a=first.process(v*2.8/(1+.18*envelope),6,adaa);
+            out=second.process(a*2.3,6,adaa)*1.6;
+        } else if(type==8) { // Shockley antiparallel diode pair + load resistor
+            out=first.process(v,7,adaa);
+        } else if(type==9) { // pre-emphasis, magnetic memory and HF loss
+            const double a=first.process(1.4*(v+.5*(v-low))+.15*flux,1,adaa);
+            flux+=fluxRate*(a-flux);out=a/(1+.12*envelope);
+        } else if(type==10) { // low-frequency magnetic core with remanent feedback
+            const double a=first.process(2.2*low+.2*flux,1,adaa);
+            flux+=fluxRate*(a-flux);out=.65*a+second.process(.85*(v-low),1,adaa);
+        } else if(type==11) {
+            const double a=first.process(1.4*v+.04,2,adaa)-ShapeADAA::value(.04,2);
+            out=second.process(1.2*a,1,adaa);
+        } else if(type==12) {
+            out=first.process(1.8*v/(1+.04*envelope),8,adaa);
+        } else if(type==13) {
+            out=first.process(v+3*(v-low),7,adaa);
+        } else if(type==14) {
+            const double a=first.process(6*v,3,adaa);
+            out=second.process(1.8*a,7,adaa);
+        } else if(type==15) {
+            const double a=first.process(2*v/(1+.12*envelope)+.08,2,adaa)-ShapeADAA::value(.08,2);
+            out=second.process(1.5*a,1,adaa);
+        }
+        const double rate=type==13?softRate:type==14?hardRate:capRate;
+        plate+=rate*(out-plate);return static_cast<float>(plate);
+    }
+};
+}
+
+namespace bassrack {
+inline float staticCharacter(float x,float drive,int type) {
+    if(type<=5)return distort(x,drive,type);
+    const double v=x*gain(drive);
+    switch(type) {
+        case 6:{const double a=std::tanh(1.6*v+.30)-std::tanh(.30);return static_cast<float>(std::tanh(1.45*a+.24)-std::tanh(.24));}
+        case 7:return static_cast<float>(1.6*ShapeADAA::value(2.3*ShapeADAA::value(2.8*v,6),6));
+        case 8:return static_cast<float>(ShapeADAA::diode(v));
+        case 9:return static_cast<float>(std::tanh(1.4*v));
+        case 10:return static_cast<float>(.65*std::tanh(2.2*v));
+        case 11:return static_cast<float>(std::tanh(1.2*(std::tanh(1.4*v+.22)-std::tanh(.22))));
+        case 12:return static_cast<float>(ShapeADAA::value(1.8*v,8));
+        case 13:return static_cast<float>(ShapeADAA::diode(v));
+        case 14:return static_cast<float>(ShapeADAA::diode(1.8*std::clamp(6*v,-1.,1.)));
+        case 15:return static_cast<float>(std::tanh(1.5*(std::tanh(2*v+.26)-std::tanh(.26))));
+        default:return x;
+    }
+}
+}
+
+namespace bassrack {
+class ShortStereoDelay {
+    std::array<std::vector<float>,2> history;size_t position=0;
+public:
+    void prepare(int delay){for(auto& c:history)c.assign(static_cast<size_t>(std::max(1,delay)),0);position=0;}
+    void reset(){for(auto& c:history)std::fill(c.begin(),c.end(),0);position=0;}
+    void process(float* l,float* r,int count) {
+        for(int i=0;i<count;++i){
+            const float a=history[0][position],b=history[1][position];
+            history[0][position]=l[i];history[1][position]=r[i];l[i]=a;r[i]=b;
+            position=(position+1)%history[0].size();
+        }
+    }
+};
+}
