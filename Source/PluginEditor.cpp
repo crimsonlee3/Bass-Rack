@@ -6,6 +6,24 @@ const std::array<Colour,5> colours{Colour(0xffe4c369),Colour(0xff77cfc0),Colour(
 String bandKey(int b,const char* suffix){return "b"+String(b)+"_"+suffix;}
 Font font(float size,bool bold=false){return Font(FontOptions(size,bold?Font::bold:Font::plain));}
 void labelStyle(Label& l,float size,Colour colour){l.setFont(font(size));l.setColour(Label::textColourId,colour);}
+
+String controlHelp(const String& id) {
+    if(id=="bass")return "Broad low-shelf EQ around 120 Hz on the combined signal. Positive dB adds bass; negative dB cuts it. Sub Protect can restore the original low Mid afterward.";
+    if(id=="air")return "Broad high-shelf EQ around 4 kHz on the combined signal. Raises or lowers the highs, rather than a narrow boost at 4 kHz.";
+    if(id=="threshold")return "Master compressor threshold in dBFS. Signal above this level is reduced. Acts on the combined signal after master EQ, before master inserts and Sub Protect.";
+    if(id=="ratio")return "Compression strength above threshold. At 4:1, an extra 4 dB above threshold becomes about 1 dB at the compressor output.";
+    if(id=="attack")return "How quickly compression responds to rising level, in milliseconds. Shorter attack catches transients; longer attack lets more initial punch through.";
+    if(id=="release")return "How quickly compression relaxes after the level drops, in milliseconds. Short settings recover quickly; long settings hold gain reduction longer.";
+    if(id=="output")return "Final manual output trim in dB, after Auto Gain and Sub Protect. Use it to set the level sent back to Logic.";
+    if(id.endsWith("_drive"))return "Pushes this region into the selected stock distortion. Higher drive usually adds more harmonics and saturation. Clean has no nonlinear shaping.";
+    if(id.endsWith("_mix"))return "Blends the stock distortion with the clean selected region: 0% is clean; 100% uses the shaped signal. AU inserts are applied afterward.";
+    if(id.endsWith("_level"))return "Gain of this processed region in dB before it is recombined with the full signal. It also affects this region's added harmonics.";
+    if(id.endsWith("_width"))return "0% collapses this region's Side, 100% keeps its width, above 100% expands Side. With Stereoize on, values above 100% also generate spread from mono; Depth sets that added amount.";
+    if(id.endsWith("_depth"))return "Amount of new Side generated from this region's Mid when Stereoize is on and Width exceeds 100%. Depth does nothing at Width 100% or below, or with Stereoize off.";
+    if(id.endsWith("_pan"))return "Moves this processed region left or right before it is recombined. Pan can change the mono balance; check the master scope.";
+    return {};
+}
+
 String frequency(float hz){return hz>=1000?String(hz/1000,hz<10000?1:0)+"k":String(roundToInt(hz));}
 }
 void BassRackEditor::RackLook::drawButtonBackground(Graphics& g,Button& button,const Colour&,bool hover,bool down) {
@@ -85,12 +103,13 @@ void BassRackEditor::Knob::bind(BassRackProcessor& p,const String& id,const Stri
         return percent?v/100.:pan?(input.containsIgnoreCase("L")?-std::abs(v)/100.:v/100.):v;
     };
     slider.setNumDecimalPlacesToDisplay(1);
+    slider.setTooltip(controlHelp(id));label.setTooltip(controlHelp(id));
 }
 void BassRackEditor::Knob::resized() {
     auto r=getLocalBounds();label.setBounds(r.removeFromTop(24));slider.setBounds(r);
 }
 Colour BassRackEditor::selectedColour() const {return selected==BassRackProcessor::master?accent:colours[static_cast<size_t>(selected)];}
-BassRackEditor::BassRackEditor(BassRackProcessor& p):AudioProcessorEditor(p),processor(p),map(*this),transfer(*this),stereoScope(*this) {
+BassRackEditor::BassRackEditor(BassRackProcessor& p):AudioProcessorEditor(p),processor(p),reductionMeter(p),map(*this),transfer(*this),stereoScope(*this) {
     look.setColour(ResizableWindow::backgroundColourId,background);
     look.setColour(TextButton::textColourOnId,accent);
     look.setColour(ComboBox::textColourId,text);
@@ -172,6 +191,34 @@ BassRackEditor::BassRackEditor(BassRackProcessor& p):AudioProcessorEditor(p),pro
     autoGain.setTooltip("Match processed level to input before output trim. Range +/-12 dB; paused during solo.");
     addAndMakeVisible(deleteButton);deleteButton.onClick=[this]{changeCount(-1);};
     setSize(1180,880);setResizable(true,true);setResizeLimits(1000,820,1600,1100);
+    addAndMakeVisible(undoButton);addAndMakeVisible(redoButton);addAndMakeVisible(reductionMeter);
+    undoButton.onClick=[this]{processor.undoControls();timerCallback();};
+    redoButton.onClick=[this]{processor.redoControls();timerCallback();};
+    undoButton.setTooltip("Undo Bass Rack control changes. Does not undo AU loading/removal or changes inside third-party effects.");
+    redoButton.setTooltip("Redo an undone Bass Rack control change.");
+    reductionMeter.setTooltip("Actual gain reduction in the master compressor, before master inserts, Auto Gain and Sub Protect. Shows the greater reduction of L/R; no reduction when the compressor is off. Sub Protect may restore low Mid afterward.");
+    subCutoffControl.setTooltip("Protect the original low-frequency Mid up to this cutoff. At 80 Hz it protects the deepest bass; 160 Hz protects more of the bass body. It blends out between the cutoff and about 1.5 times that frequency. This is not a bass boost; Side stays processed.");
+    compress.setTooltip("Compresses the full combined signal after region processing and master EQ, before master AU inserts. Sub Protect later restores original low Mid below its cutoff. Watch GR for compressor gain reduction.");
+    autoGain.setTooltip("Matches processed RMS to the original input before Sub Protect and manual output trim, within +/-12 dB. Paused during solo. Sub restoration can change the final level.");
+    frequencyControl.setTooltip("Low edge of the selected processing region. Moves this boundary while holding the high edge in place. Double-click the value to type Hz or kHz.");
+    highControl.setTooltip("High edge of the selected processing region. Moves this boundary while holding the low edge in place. Double-click the value to type Hz or kHz.");
+    qControl.setTooltip("Region bandwidth: higher Q is narrower. Changing Q moves both edges around the centre. Use Low/High Edge to move only one boundary.");
+    slope.setTooltip("How steeply the selected region rolls off outside its edges. Higher dB/oct isolates more sharply. Finite filter resolution still applies.");
+    oversamplingChoice.setTooltip("Runs stock nonlinear processing at 1x, 2x, 4x, 8x or 16x to reduce aliasing. Higher settings use more CPU and can add latency. Does not oversample hosted AUs.");
+    type.setTooltip("Stock distortion character for this region. Drive sets how hard it is pushed; Distortion Mix blends it with clean audio.");
+    channelMode.setTooltip("Stereo processes both channels. Mid only processes the centre sum; Side only processes L/R differences while preserving the other component.");
+    mute.setTooltip("Mutes this region's processed contribution. Other regions and the original full signal remain.");
+    solo.setTooltip("Listen to this region in isolation. Auto Gain pauses while solo is active.");
+    bypass.setTooltip("Bypass this region's processing contribution.");
+    masterButton.setTooltip("Master/Finish: broad EQ and full-signal compression, followed by master AU inserts, Auto Gain, Sub Protect and output trim.");
+    addButton.setTooltip("Add a processing region, up to five. You can also double-click the frequency graph.");
+    removeButton.setTooltip("Delete the selected region and its AU inserts. Control Undo does not restore removed third-party inserts.");
+    deleteButton.setTooltip(removeButton.getTooltip());
+    scanButton.setTooltip("Discover registered Audio Unit effects. Instruments are excluded; effects are initialized only when loaded into an insert.");
+    saveButton.setTooltip("Save Bass Rack controls and hosted effect states as a rack preset.");
+    loadButton.setTooltip("Load a saved rack preset, replacing the current controls and insert routing.");
+    for(auto& button:bandButtons)button.setTooltip("Select this region. An empty slot creates a region.");
+    for(auto& button:inserts)button.setTooltip("Open this insert's menu to edit, load, replace or remove an Audio Unit effect. Slots belong to the selected region or Master.");
     select(0);startTimerHz(30);
 }
 BassRackEditor::~BassRackEditor(){stopTimer();processor.setStereoAnalysis(BassRackProcessor::master,false);setLookAndFeel(nullptr);}
@@ -181,7 +228,7 @@ void BassRackEditor::select(int band) {
     frequencyControl.setVisible(!master);highControl.setVisible(!master);qControl.setVisible(!master);slope.setVisible(!master);deleteButton.setVisible(!master);
     channelMode.setVisible(!master);harmonicsMode.setVisible(!master);stereoize.setVisible(!master);subCutoffControl.setVisible(master);
     typeAttachment.reset();muteAttachment.reset();soloAttachment.reset();bypassAttachment.reset();compressAttachment.reset();
-    type.setVisible(!master);transfer.setVisible(!master);
+    type.setVisible(!master);transfer.setVisible(!master);reductionMeter.setVisible(master);
     mute.setVisible(!master);solo.setVisible(!master);bypass.setVisible(!master);compress.setVisible(master);
     for(auto& knob:knobs){knob.setVisible(true);knob.setEnabled(true);knob.slider.setColour(Slider::rotarySliderFillColourId,selectedColour());}
     for(auto* toggle:{&mute,&solo,&bypass,&compress})toggle->setColour(ToggleButton::tickColourId,selectedColour());
@@ -248,6 +295,7 @@ void BassRackEditor::insertMenu(int slot) {
         });
 }
 void BassRackEditor::timerCallback() {
+    undoButton.setEnabled(processor.controlUndo.canUndo());redoButton.setEnabled(processor.controlUndo.canRedo());reductionMeter.repaint();
     if(selected!=BassRackProcessor::master&&!processor.bandActive(selected)){select(BassRackProcessor::master);return;}
     if(selected==BassRackProcessor::master)selectionTitle.setText("MASTER / FINISH",dontSendNotification);
     else {
@@ -300,6 +348,8 @@ void BassRackEditor::paint(Graphics& g) {
 }
 void BassRackEditor::resized() {
     const int w=getWidth(),c=getHeight()-426;
+    undoButton.setBounds(w-184,c+290,64,24);redoButton.setBounds(w-112,c+290,64,24);
+    reductionMeter.setBounds(w-430,c+51,370,36);
     title.setBounds(26,15,240,30);subtitle.setBounds(28,45,280,18);
     presets.setBounds(w-630,22,242,32);scanButton.setBounds(w-372,22,124,32);
     saveButton.setBounds(w-236,22,96,32);loadButton.setBounds(w-128,22,100,32);
@@ -643,4 +693,16 @@ void BassRackEditor::StereoScope::paint(Graphics& g) {
         if(share>0){g.setColour(tint[i]);g.fillRoundedRectangle(96,static_cast<float>(y+4),width*share,4,2);}
         g.setColour(audible?text:muted);g.drawText(audible?String(roundToInt(share*100))+"%":"--",getWidth()-42,y,30,12,Justification::centredRight);
     }
+}void BassRackEditor::ReductionMeter::paint(Graphics& g) {
+    const float db=processor.compressionReductionDb();
+    g.setFont(font(10,true));g.setColour(muted);
+    g.drawText("COMP GR",0,0,82,16,Justification::centredLeft);
+    g.setColour(text);g.drawText(String(db,1)+" dB",getWidth()-70,0,70,16,Justification::centredRight);
+    Rectangle<float> bar(0,21,getWidth(),7);g.setColour(edge);g.fillRoundedRectangle(bar,3);
+    const float width=bar.getWidth()*jlimit(0.f,1.f,db/24);
+    if(width>0){g.setColour(accent);g.fillRoundedRectangle(bar.withWidth(width),3);}
+    g.setFont(font(8));g.setColour(muted);
+    for(int i=0;i<=4;++i){const int x=roundToInt(i*bar.getWidth()/4);
+        g.drawVerticalLine(jmin(getWidth()-1,x),20,30);g.drawText(String(i*6),jlimit(0,getWidth()-22,x-11),29,22,9,Justification::centred);}
 }
+

@@ -90,6 +90,15 @@ private:
     };
     BassRackProcessor& processor;
     RackLook look;
+    juce::TooltipWindow helpers{this,650};
+    juce::TextButton undoButton{"UNDO"},redoButton{"REDO"};
+    class ReductionMeter final : public juce::Component,public juce::SettableTooltipClient {
+    public:
+        explicit ReductionMeter(BassRackProcessor& p):processor(p){}
+        void paint(juce::Graphics&)override;
+    private:
+        BassRackProcessor& processor;
+    } reductionMeter;
     BandMap map;
     TransferCurve transfer;
     StereoScope stereoScope;

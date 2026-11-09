@@ -1,4 +1,30 @@
-# Bass Rack 0.5.1
+# Bass Rack 0.5.2
+
+## Control help, compressor meter and Undo/Redo
+
+Hover over controls or knob labels for explanations (about 650 ms).
+Master Bass is a broad low shelf around 120 Hz; Treble is a broad high shelf
+around 4 kHz. The master compressor acts on the combined signal after EQ and
+before master inserts. Its GR meter reports actual compressor attenuation,
+showing the greater L/R reduction on a 0–24 dB bar with a numeric reading.
+The display falls back over about 250 ms and clears when compression is off.
+It does not represent reduction in third-party inserts or subsequent Auto Gain.
+
+Sub Protect restores original low Mid through its cutoff and blends out up to
+about 1.5 times the cutoff. Raising 80 Hz to 160 Hz protects more bass body.
+It is not a low-shelf boost. Because restoration follows compression and
+Auto Gain, protected low Mid can differ from the compressor's displayed reduction.
+
+Width controls Side level; at 100% it is neutral. With Stereoize enabled,
+Width above 100% generates additional Side from Mid, scaled by Depth.
+Depth has no effect with Stereoize off or Width at/below 100%.
+
+Undo/Redo covers Bass Rack parameter edits, including grouped node drags,
+edge edits and factory settings. It does not restore removed/changed AU instances
+or undo vendor-editor controls. Rack preset restore starts a new control history.
+Pitch-follow and manual key/scale processing are still proposed, not implemented
+in this build.
+
 
 ## AU loading stability update
 
@@ -14,7 +40,7 @@ They do not establish compatibility with Acustica Purple4AA. AU hosting still
 runs in-process: a native fault inside an effect can take down Logic.
 
 If an AU crashes while loading, inspect
-`~/Library/Application Support/BassRack/last-host-load.txt`.
+`~/Library/BassRack/last-host-load.txt`.
 It records the most recent load stage, effect name/identifier/version and time,
 without audio or preset contents. In projects with multiple rack instances it
 describes the most recent operation across those instances.

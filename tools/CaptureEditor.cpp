@@ -330,11 +330,51 @@ static void runHostingChecks() {
     std::cout<<"Hosting lifecycle: failure rollback, replacement/editor order, cancellation and configuration guards passed\n";
 }
 
+
+static void runControlAndMeterChecks() {
+    BassRackProcessor p;
+    p.factoryPreset(0);p.state.copyState();p.controlUndo.clearUndoHistory();
+    p.setParam("bass",6);
+    require(p.undoControls()&&std::abs(p.value("bass"))<.001f,"Control undo failed");
+    require(p.redoControls()&&std::abs(p.value("bass")-6)<.001f,"Control redo failed");
+    const auto before=p.regionEdges(0);
+    p.setRegionEdges(0,200,2000);
+    require(p.undoControls(),"Region edge undo unavailable");
+    const auto restored=p.regionEdges(0);
+    require(std::abs(restored[0]-before[0])<.1f&&std::abs(restored[1]-before[1])<.1f,
+        "Undo separated a grouped low/high edit");
+    require(p.redoControls(),"Region edge redo unavailable");
+    auto edges=p.regionEdges(0);
+    require(std::abs(edges[0]-200)<.1f&&std::abs(edges[1]-2000)<.1f,"Grouped edge redo failed");
+    p.setParam("output",-3);
+    require(!p.controlUndo.canRedo(),"New edit did not invalidate redo");
+    p.factoryPreset(0);p.setParam("oversampling",0);p.setParam("subprotect",0);
+    p.setParam("b0_active",0);p.setParam("threshold",-24);p.setParam("ratio",4);
+    p.setParam("attack",1);p.setParam("release",50);p.setParam("compress",1);
+    p.setRateAndBufferSizeDetails(48000,512);p.prepareToPlay(48000,512);
+    juce::AudioBuffer<float> block(2,512);juce::MidiBuffer midi;
+    for(int count=0;count<200;++count) {
+        for(int i=0;i<512;++i){block.setSample(0,i,.5f);block.setSample(1,i,.25f);}
+        p.processBlock(block,midi);
+    }
+    const float expected=(-6.0206f+24)*(1-1.f/4);
+    const float measured=-juce::Decibels::gainToDecibels(std::abs(block.getSample(0,511))/.5f);
+    require(std::abs(p.compressionReductionDb()-expected)<.06f
+        &&std::abs(p.compressionReductionDb()-measured)<.06f,
+        "Compressor meter does not match actual applied gain");
+    std::cout<<"Controls: undo/redo, grouped edges, redo invalidation passed; compressor GR "
+        <<p.compressionReductionDb()<<" dB / measured "<<measured<<" dB\n";
+    p.setParam("compress",0);block.clear();p.processBlock(block,midi);
+    require(p.compressionReductionDb()==0,"Bypassed compressor retained GR");
+    p.releaseResources();
+}
+
 int main(int argc,char** argv) {
     juce::ScopedJuceInitialiser_GUI gui;
     const auto folder=argc>1?juce::File(argv[1]):juce::File::getCurrentWorkingDirectory().getChildFile("previews");
     BassRackProcessor processor;
     runHostingChecks();
+    runControlAndMeterChecks();
     runEngineChecks(processor);
     runRevisionChecks(processor);
     processor.factoryPreset(1);
@@ -346,6 +386,9 @@ int main(int argc,char** argv) {
 
     capture(processor,folder.getChildFile("bass-rack-five-bands.png"),false);
     capture(processor,folder.getChildFile("bass-rack-master.png"),true);
+    processor.setParam("compress",1);processor.setParam("threshold",-24);processor.setParam("ratio",4);
+    capture(processor,folder.getChildFile("bass-rack-master-gr.png"),true);
+    processor.setParam("compress",0);
     captureStereoUI(processor,folder.getChildFile("bass-rack-stereo-region.png"),false);
     captureStereoUI(processor,folder.getChildFile("bass-rack-stereo-master.png"),true);
     processor.showScanner();

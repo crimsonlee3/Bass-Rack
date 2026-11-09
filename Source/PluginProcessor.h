@@ -4,12 +4,18 @@
 #include "Dsp.h"
 
 class BassRackProcessor final : public juce::AudioProcessor,private juce::AsyncUpdater,
-    private juce::AudioProcessorValueTreeState::Listener {
+    private juce::AudioProcessorValueTreeState::Listener,private juce::AudioProcessorListener {
 public:
     static constexpr int bands=5,racks=6,slots=3,master=5,regionDelay=4096,irSize=8193;
     BassRackProcessor();
     ~BassRackProcessor() override;
+    juce::UndoManager controlUndo{20000,100};
     juce::AudioProcessorValueTreeState state;
+    bool undoControls();
+    bool redoControls();
+    void beginControlEdit(const juce::String&);
+    void endControlEdit();
+    float compressionReductionDb()const{return reductionDb.load();}
     juce::AudioPluginFormatManager formats;
     juce::KnownPluginList known;
     const juce::String getName()const override{return "Bass Rack";}
@@ -115,6 +121,13 @@ private:
     void updateLatency();
     void handleAsyncUpdate()override;
     void parameterChanged(const juce::String&,float)override;
+    void audioProcessorParameterChanged(juce::AudioProcessor*,int,float)override{}
+    void audioProcessorChanged(juce::AudioProcessor*,const juce::AudioProcessorListener::ChangeDetails&)override{}
+    void audioProcessorParameterChangeGestureBegin(juce::AudioProcessor*,int)override;
+    void audioProcessorParameterChangeGestureEnd(juce::AudioProcessor*,int)override;
+    int controlEditDepth=0;
+    bool applyingUndo=false;
+    std::atomic<float> reductionDb{0};
     void restoreRack(juce::ValueTree);
     void closePluginWindows();
     void closePluginEditor(juce::AudioPluginInstance*);

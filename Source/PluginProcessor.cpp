@@ -57,7 +57,7 @@ AudioProcessorValueTreeState::ParameterLayout BassRackProcessor::parameters() {
 }
 BassRackProcessor::BassRackProcessor()
 :AudioProcessor(BusesProperties().withInput("Input",AudioChannelSet::stereo(),true).withOutput("Output",AudioChannelSet::stereo(),true)),
- state(*this,nullptr,"BASSRACK",parameters()) {
+ state(*this,&controlUndo,"BASSRACK",parameters()) {
     formats.addFormat(new EffectsOnlyAUFormat);
     knownFile=File::getSpecialLocation(File::userApplicationDataDirectory).getChildFile("BassRack").getChildFile("known-plugins.xml");
     knownFile.getParentDirectory().createDirectory();
@@ -69,8 +69,10 @@ BassRackProcessor::BassRackProcessor()
     }
     state.addParameterListener("oversampling",this);state.addParameterListener("subcutoff",this);
     for(int b=0;b<bands;++b)state.addParameterListener(key(b,"active"),this);
+    state.copyState();controlUndo.clearUndoHistory();addListener(this);
 }
 BassRackProcessor::~BassRackProcessor() {
+    removeListener(this);
     cancelPendingUpdate();
     state.removeParameterListener("oversampling",this);state.removeParameterListener("subcutoff",this);
     for(int b=0;b<bands;++b)for(auto* suffix:{"freq","q","slope","harmonics","active"})state.removeParameterListener(key(b,suffix),this);
@@ -85,6 +87,28 @@ bool BassRackProcessor::isBusesLayoutSupported(const BusesLayout& l)const {
         &&(l.getMainOutputChannelSet()==AudioChannelSet::stereo()||(l.getMainInputChannelSet()==AudioChannelSet::mono()&&l.getMainOutputChannelSet()==AudioChannelSet::mono()));
 }
 float BassRackProcessor::value(const String& id)const{return state.getRawParameterValue(id)->load();}
+void BassRackProcessor::beginControlEdit(const String& name) {
+    if(applyingUndo||!MessageManager::getInstance()->isThisTheMessageThread())return;
+    if(controlEditDepth++==0){state.copyState();controlUndo.beginNewTransaction(name);}
+}
+void BassRackProcessor::endControlEdit() {
+    if(applyingUndo||!MessageManager::getInstance()->isThisTheMessageThread())return;
+    if(controlEditDepth>0&&--controlEditDepth==0){state.copyState();controlUndo.beginNewTransaction();}
+}
+void BassRackProcessor::audioProcessorParameterChangeGestureBegin(AudioProcessor*,int index) {
+    if(index>=0&&index<getParameters().size())beginControlEdit(getParameters()[index]->getName(80));
+}
+void BassRackProcessor::audioProcessorParameterChangeGestureEnd(AudioProcessor*,int){endControlEdit();}
+bool BassRackProcessor::undoControls() {
+    if(controlEditDepth>0)return false;
+    state.copyState();ScopedValueSetter<bool> guard(applyingUndo,true);
+    return controlUndo.undo();
+}
+bool BassRackProcessor::redoControls() {
+    if(controlEditDepth>0)return false;
+    state.copyState();ScopedValueSetter<bool> guard(applyingUndo,true);
+    return controlUndo.redo();
+}
 void BassRackProcessor::setParam(const String& id,float v) {
     if(auto* p=state.getParameter(id)){p->beginChangeGesture();p->setValueNotifyingHost(p->convertTo0to1(v));p->endChangeGesture();}
 }
@@ -147,12 +171,14 @@ std::array<float,2> BassRackProcessor::regionEdges(int b)const {
     return {static_cast<float>(jlimit(20.,20000.,e[0])),static_cast<float>(jlimit(20.,20000.,e[1]))};
 }
 void BassRackProcessor::setRegionEdges(int b,float low,float high,bool gesture) {
+    if(gesture)beginControlEdit("Region edges");
     low=jlimit(20.f,19999.f,low);high=jlimit(low+1,20000.f,high);
     const float centre=std::sqrt(low*high),q=jlimit(.03f,16.f,centre/(high-low));
     for(const auto& v:std::array<std::pair<const char*,float>,2>{{{"freq",centre},{"q",q}}}) {
         auto* p=state.getParameter(key(b,v.first));if(gesture)p->beginChangeGesture();
         p->setValueNotifyingHost(p->convertTo0to1(v.second));if(gesture)p->endChangeGesture();
     }
+    if(gesture)endControlEdit();
 }
 juce::AudioBuffer<float> BassRackProcessor::designSub(double sr)const {
     constexpr int n=8192;dsp::FFT fft(13);std::vector<std::complex<float>> frequency(n),time(n);
@@ -197,7 +223,7 @@ void BassRackProcessor::prepareToPlay(double sr,int block) {
     *lowEQ.state=dsp::IIR::ArrayCoefficients<float>::makeLowShelf(sr,120,.707f,bassrack::gain(value("bass")));
     *highEQ.state=dsp::IIR::ArrayCoefficients<float>::makeHighShelf(sr,jmin(4000.,sr*.4),.707f,bassrack::gain(value("air")));
     lowEQ.prepare(spec);highEQ.prepare(spec);compressor.prepare(spec);
-    lowEQ.reset();highEQ.reset();compressor.reset();
+    lowEQ.reset();highEQ.reset();compressor.reset();reductionDb.store(0);
     output.reset(sr,.02);output.setCurrentAndTargetValue(bassrack::gain(value("output")));
     for(auto& rack:chains)for(auto& s:rack)if(s.plugin){s.plugin->setRateAndBufferSizeDetails(sr,blockSize);s.plugin->prepareToPlay(sr,blockSize);}
     prepared=true;updateLatency();setLatencySamples(desiredLatency.load());
@@ -394,7 +420,18 @@ void BassRackProcessor::processChunk(juce::AudioBuffer<float>& buffer) {
     *highEQ.state=dsp::IIR::ArrayCoefficients<float>::makeHighShelf(sampleRate,jmin(4000.,sampleRate*.4),.707f,bassrack::gain(value("air")));
     dsp::AudioBlock<float> finalBlock(buffer);dsp::ProcessContextReplacing<float> context(finalBlock);
     lowEQ.process(context);highEQ.process(context);compressor.setThreshold(value("threshold"));compressor.setRatio(value("ratio"));
-    compressor.setAttack(value("attack"));compressor.setRelease(value("release"));if(value("compress")>.5f)compressor.process(context);
+    compressor.setAttack(value("attack"));compressor.setRelease(value("release"));
+    float reduction=0;
+    if(value("compress")>.5f) {
+        for(int ch=0;ch<2;++ch)for(int i=0;i<n;++i) {
+            const float input=buffer.getSample(ch,i),out=compressor.processSample(ch,input);
+            if(std::abs(input)>1.e-8f)
+                reduction=jmax(reduction,jlimit(0.f,60.f,-Decibels::gainToDecibels(std::abs(out/input),-60.f)));
+            buffer.setSample(ch,i,out);
+        }
+        const float decay=static_cast<float>(std::exp(-n/(sampleRate*.25)));
+        reductionDb.store(jmax(reduction,reductionDb.load()*decay));
+    } else reductionDb.store(0);
     processRack(master,buffer);output.setTargetValue(bassrack::gain(value("output")));
     for(int i=0;i<n;++i) {
         float l=buffer.getSample(0,i),r=buffer.getSample(1,i);
@@ -647,6 +684,7 @@ void BassRackProcessor::handleAsyncUpdate() {
     }
 }
 void BassRackProcessor::factoryPreset(int preset) {
+    beginControlEdit("Factory preset");
     for(int b=0;b<bands;++b) {
         for(auto* id:{"type","drive","level","pan","mute","solo","bypass","active"})setParam(key(b,id),0);
         setParam(key(b,"mix"),1);setParam(key(b,"width"),1);setParam(key(b,"q"),1);setParam(key(b,"slope"),1);setParam(key(b,"depth"),.65f);setParam(key(b,"stereoize"),1);setParam(key(b,"channel"),0);setParam(key(b,"harmonics"),0);
@@ -668,6 +706,7 @@ void BassRackProcessor::factoryPreset(int preset) {
         setParam(key(1,"active"),1);setParam(key(1,"freq"),1700);setParam(key(1,"type"),2);
         setParam(key(1,"drive"),18);setParam(key(1,"mix"),.4f);setParam(key(1,"width"),1.3f);setParam("autogain",1);
     }
+    endControlEdit();
 }
 void BassRackProcessor::savePreset(const File& file) {
     MemoryBlock block;getStateInformation(block);
