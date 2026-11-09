@@ -1,4 +1,4 @@
-# Bass Rack 0.4.0
+# Bass Rack 0.4.1
 
 A macOS AU effect for Logic Pro with up to five independent frequency regions,
 stock distortion, per-region AU effects, stereo controls, master EQ/compression,
@@ -38,27 +38,27 @@ output of nonlinear processing or third-party effects. Regions are finite
 filters: extremely narrow low-frequency selections are limited by the 8193-tap
 FIR resolution, and overlaps combine the changes from each region.
 
-## Effects-only AU scanning
+## Scanner hotfix / 0.4.1
 
-SCAN AUs opens a foreground, always-on-top scan window with progress, current
-effect, accepted/rejected counts, elapsed time and cancellation. Scanning
-starts automatically and can be repeated with RESCAN.
+The default scanner now reads macOS AU registration metadata only and reuses
+cached entries. It never instantiates effect DSP during discovery, removing the
+in-process validation path that could take Logic down when a third-party effect
+crashed. Stereo compatibility is checked when an insert is actually loaded.
+Actual insert hosting is still in-process; this hotfix is not full crash isolation
+for faults during playback/loading. No in-process "validate all" option is offered.
 
-Only registered **aufx** (audio effects) and **aumf** (audio/music effects) AU
-identifiers enter validation. Instruments (aumu), generators (augn), MIDI-only
-processors (aumi), mixers and output units are filtered before instantiation.
-Cached non-effect entries are removed. Both the insert menu and load path
-enforce the same classification. The scanner additionally requires stereo audio
-input/output. Instruments cannot be loaded as band or master inserts.
+## Effects-only AU discovery
 
-Three serial AU slots are available on each region and the master. A slot
-opens an editor/load/remove menu. AUv2 and asynchronously instantiated AUv3
-effects are supported where JUCE/macOS can load them. Effects must be installed,
-licensed and compatible with the architecture in which Logic runs.
+SCAN AUs opens a foreground metadata-only discovery window with progress,
+elapsed time, cache reuse and cancellation. Instruments (aumu), generators
+(augn), MIDI-only processors (aumi), mixers and outputs are excluded. Discovery
+enumerates only aufx/aumf registrations and does not instantiate effects.
 
-Scanning/loading is in-process: a broken third-party effect can still crash its
-host. Cancellation stops subsequent validations; an in-flight native creation
-cannot safely be forcibly terminated.
+Stereo input/output compatibility is checked when an effect is loaded into an
+insert. Three serial AU slots are available per region and on the master.
+Effects must be installed, licensed and compatible with Logic's architecture.
+Hosting an inserted AU is still in-process; this scanner hotfix does not isolate
+faults in an effect during loading or playback. No in-process deep scan is used.
 
 ## Stereo analysis / 0.4.0
 

@@ -1,8 +1,9 @@
 #pragma once
 #include "Dsp.h"
 #include <juce_audio_utils/juce_audio_utils.h>
-inline bool eligibleAU(const juce::String& id) {return bassrack::effectAUIdentifier(id.toStdString());}
-
+#include <AudioToolbox/AudioToolbox.h>
+#include <unordered_map>
+inline bool eligibleAU(const juce::String& id){return bassrack::effectAUIdentifier(id.toStdString());}
 class EffectsOnlyAUFormat final : public juce::AudioUnitPluginFormat {
 public:
     juce::StringArray searchPathsForPlugins(const juce::FileSearchPath& paths,bool recursive,bool async)override {
@@ -10,88 +11,93 @@ public:
         for(int i=all.size();--i>=0;)if(!eligibleAU(all[i]))all.remove(i);
         return all;
     }
-    bool fileMightContainThisPluginType(const juce::String& id)override {
-        return eligibleAU(id)&&AudioUnitPluginFormat::fileMightContainThisPluginType(id);
-    }
+    bool fileMightContainThisPluginType(const juce::String& id)override{return eligibleAU(id)&&AudioUnitPluginFormat::fileMightContainThisPluginType(id);}
     void findAllTypesForFile(juce::OwnedArray<juce::PluginDescription>& out,const juce::String& id)override {
         if(eligibleAU(id))AudioUnitPluginFormat::findAllTypesForFile(out,id);
     }
 };
+inline juce::String auFourCC(OSType code) {
+    char value[5]{static_cast<char>(code>>24),static_cast<char>(code>>16),static_cast<char>(code>>8),static_cast<char>(code),0};
+    return juce::String::fromUTF8(value,4);
+}
+// Registration metadata only. Never creates an AudioUnit or opens an audio processor.
+inline std::vector<juce::PluginDescription> registeredEffects() {
+    std::vector<juce::PluginDescription> out;
+    for(OSType type:{static_cast<OSType>(kAudioUnitType_Effect),static_cast<OSType>(kAudioUnitType_MusicEffect)}) {
+        AudioComponentDescription query{};query.componentType=type;AudioComponent component=nullptr;
+        while((component=AudioComponentFindNext(component,&query))!=nullptr) {
+            AudioComponentDescription d{};if(AudioComponentGetDescription(component,&d)!=noErr)continue;
+            juce::PluginDescription p;
+            p.fileOrIdentifier="AudioUnit:Effects/"+auFourCC(d.componentType)+","+auFourCC(d.componentSubType)+","+auFourCC(d.componentManufacturer);
+            if(!eligibleAU(p.fileOrIdentifier)||p.fileOrIdentifier.endsWith("aufx,BsRk,Crsn"))continue;
+            CFStringRef label=nullptr;
+            if(AudioComponentCopyName(component,&label)==noErr&&label!=nullptr){p.name=juce::String::fromCFString(label);CFRelease(label);}
+            const int colon=p.name.indexOfChar(':');
+            if(colon>=0){p.manufacturerName=p.name.substring(0,colon).trim();p.name=p.name.substring(colon+1).trim();}
+            else p.manufacturerName=auFourCC(d.componentManufacturer);
+            if(p.name.isEmpty())p.name=p.fileOrIdentifier;
+            UInt32 version=0;if(AudioComponentGetVersion(component,&version)==noErr)
+                p.version=juce::String(static_cast<int>(version>>16))+"."+juce::String(static_cast<int>((version>>8)&255))+"."+juce::String(static_cast<int>(version&255));
+            p.pluginFormatName="AudioUnit";p.category="Effect";p.isInstrument=false;
+            p.uniqueId=p.deprecatedUid=p.fileOrIdentifier.hashCode();p.numInputChannels=p.numOutputChannels=0;
+            out.push_back(p);
+        }
+    }
+    std::sort(out.begin(),out.end(),[](const auto& a,const auto& b){return a.name.compareIgnoreCase(b.name)<0;});
+    return out;
+}
 class EffectScanPanel final : public juce::Component,private juce::Timer {
 public:
-    EffectScanPanel(juce::AudioPluginFormatManager& f,juce::KnownPluginList& k,
-        std::function<void(juce::String)> report):formats(f),known(k),notify(std::move(report)),bar(progress) {
-        title.setText("AUDIO UNIT EFFECTS",juce::dontSendNotification);
-        title.setFont(juce::Font(juce::FontOptions(20)));
+    EffectScanPanel(juce::AudioPluginFormatManager&,juce::KnownPluginList& list,
+        std::function<void(juce::String)> report,juce::File cache={})
+        :known(list),notify(std::move(report)),cacheFile(cache),bar(progress) {
+        title.setText("FAST AUDIO UNIT EFFECT DISCOVERY",juce::dontSendNotification);
+        title.setFont(juce::Font(juce::FontOptions(19)));
         for(auto* label:{&title,&current,&detail}){label->setColour(juce::Label::textColourId,juce::Colours::whitesmoke);addAndMakeVisible(*label);}
         addAndMakeVisible(bar);addAndMakeVisible(scan);addAndMakeVisible(cancel);
-        scan.onClick=[this]{start();};cancel.onClick=[this]{cancelled=true;cancel.setEnabled(false);detail.setText("Stopping after the current effect. No further effects will be loaded.",juce::dontSendNotification);notify("AU scan cancellation requested");};
+        scan.onClick=[this]{start();};cancel.onClick=[this]{stopTimer();current.setText("Discovery cancelled",juce::dontSendNotification);scan.setEnabled(true);cancel.setEnabled(false);notify("AU discovery cancelled");};
         setSize(640,238);start();
     }
     void paint(juce::Graphics& g)override{g.fillAll(juce::Colour(0xff171c21));}
     void resized()override {
         title.setBounds(24,18,getWidth()-48,30);current.setBounds(24,58,getWidth()-48,26);
-        bar.setBounds(24,101,getWidth()-48,22);detail.setBounds(24,132,getWidth()-48,40);
-        scan.setBounds(getWidth()-268,188,116,30);cancel.setBounds(getWidth()-140,188,116,30);
+        bar.setBounds(24,101,getWidth()-48,22);detail.setBounds(24,132,getWidth()-48,42);
+        scan.setBounds(getWidth()-290,188,150,30);cancel.setBounds(getWidth()-128,188,104,30);
     }
 private:
-    juce::AudioPluginFormatManager& formats;juce::KnownPluginList& known;
-    std::function<void(juce::String)> notify;
-    double progress=0;juce::ProgressBar bar;
-    juce::Label title,current,detail;
-    juce::TextButton scan{"RESCAN"},cancel{"CANCEL"};
-    juce::StringArray candidates;
-    int index=0,accepted=0,rejected=0;bool waiting=false,cancelled=false;
-    juce::Time started;
+    juce::KnownPluginList& known;std::function<void(juce::String)> notify;juce::File cacheFile;
+    double progress=0,started=0;juce::ProgressBar bar;juce::Label title,current,detail;
+    juce::TextButton scan{"REFRESH EFFECTS"},cancel{"CANCEL"};
+    std::vector<juce::PluginDescription> entries;
+    std::unordered_map<std::string,juce::PluginDescription> cached;
+    int index=0,reused=0;bool enumerated=false;
     void start() {
-        if(waiting)return;
-        candidates.clear();index=accepted=rejected=0;progress=0;cancelled=false;
-        started=juce::Time::getCurrentTime();scan.setEnabled(false);cancel.setEnabled(true);
-        if(formats.getNumFormats()>0)candidates=formats.getFormat(0)->searchPathsForPlugins({},false,true);
-        for(int i=candidates.size();--i>=0;) {
-            if(!eligibleAU(candidates[i]) || candidates[i].endsWith("aufx,BsRk,Crsn"))candidates.remove(i);
-        }
-        current.setText("Preparing "+juce::String(candidates.size())+" effect candidates...",juce::dontSendNotification);
-        detail.setText("Instruments, generators and MIDI-only plugins are excluded before validation.",juce::dontSendNotification);
-        notify("Scanning AU effects / 0 of "+juce::String(candidates.size()));
-        startTimer(80);
+        stopTimer();index=reused=0;progress=0;enumerated=false;entries.clear();cached.clear();
+        for(const auto& d:known.getTypes())cached.emplace(d.fileOrIdentifier.toStdString(),d);
+        scan.setEnabled(false);cancel.setEnabled(true);started=juce::Time::getMillisecondCounterHiRes();
+        current.setText("Reading macOS effect registration metadata...",juce::dontSendNotification);
+        detail.setText("No effects are instantiated during discovery. Stereo compatibility is checked when loading an insert.",juce::dontSendNotification);
+        notify("Discovering AU effects / metadata only");startTimer(15);
     }
     void timerCallback()override {
-        if(waiting)return;
-        if(cancelled || index>=candidates.size()) {
-            stopTimer();progress=cancelled?progress:1;scan.setEnabled(true);cancel.setEnabled(false);
-            const auto seconds=(juce::Time::getCurrentTime()-started).inSeconds();
-            auto summary=(cancelled?juce::String("Cancelled"):juce::String("Complete"))+" / "+
-                juce::String(accepted)+" effects ready / "+juce::String(rejected)+" unsupported or unavailable / "+juce::String(seconds)+" s";
-            current.setText(summary,juce::dontSendNotification);notify("AU scan: "+summary);return;
+        if(!enumerated){entries=registeredEffects();enumerated=true;}
+        const int end=juce::jmin(index+32,static_cast<int>(entries.size()));
+        for(;index<end;++index) {
+            const auto& d=entries[static_cast<size_t>(index)];const auto old=cached.find(d.fileOrIdentifier.toStdString());
+            if(old!=cached.end()&&old->second.version==d.version)++reused;
+            else {if(old!=cached.end())known.removeType(old->second);known.addType(d);}
         }
-        const auto id=candidates[index];
-        const auto name=formats.getFormat(0)->getNameOfPluginFromIdentifier(id);
-        current.setText("Scanning "+juce::String(index+1)+" / "+juce::String(candidates.size())+" : "+name,juce::dontSendNotification);
-        notify("Scanning AU effect "+juce::String(index+1)+"/"+juce::String(candidates.size())+" / "+name);
-        waiting=true;
-        juce::PluginDescription description;description.fileOrIdentifier=id;description.pluginFormatName="AudioUnit";description.name=name;
-        juce::Component::SafePointer<EffectScanPanel> safe(this);
-        formats.createPluginInstanceAsync(description,48000,512,
-            [safe](std::unique_ptr<juce::AudioPluginInstance> plugin,const juce::String&) {
-                if(!safe)return;
-                safe->waiting=false;
-                if(!safe->cancelled && plugin) {
-                    plugin->disableNonMainBuses();auto layout=plugin->getBusesLayout();
-                    bool stereo=!layout.inputBuses.isEmpty()&&!layout.outputBuses.isEmpty();
-                    if(stereo) {
-                        layout.inputBuses.getReference(0)=juce::AudioChannelSet::stereo();
-                        layout.outputBuses.getReference(0)=juce::AudioChannelSet::stereo();
-                        stereo=plugin->setBusesLayout(layout);
-                    }
-                    auto d=plugin->getPluginDescription();
-                    if(stereo&&!d.isInstrument&&eligibleAU(d.fileOrIdentifier)) {
-                        safe->known.addType(d);++safe->accepted;
-                    }else ++safe->rejected;
-                }else ++safe->rejected;
-                ++safe->index;
-                safe->progress=safe->candidates.isEmpty()?1:static_cast<double>(safe->index)/safe->candidates.size();
-                safe->detail.setText(juce::String(safe->accepted)+" stereo effects available. Instruments were not scanned.",juce::dontSendNotification);
-            });
+        progress=entries.empty()?1:static_cast<double>(index)/entries.size();
+        current.setText("Discovered "+juce::String(index)+" / "+juce::String(entries.size())+" effects",juce::dontSendNotification);
+        if(index==static_cast<int>(entries.size())) {
+            stopTimer();scan.setEnabled(true);cancel.setEnabled(false);
+            std::unordered_map<std::string,bool> present;for(const auto& d:entries)present[d.fileOrIdentifier.toStdString()]=true;
+            for(const auto& d:known.getTypes())if(!eligibleAU(d.fileOrIdentifier)||present.find(d.fileOrIdentifier.toStdString())==present.end())known.removeType(d);
+            if(cacheFile!=juce::File{})if(auto xml=known.createXml())xml->writeTo(cacheFile);
+            const auto ms=juce::Time::getMillisecondCounterHiRes()-started;
+            const auto summary=juce::String(entries.size())+" effects / "+juce::String(reused)+" cached / "+juce::String(ms/1000.,2)+" s";
+            detail.setText("Ready. Metadata-only discovery; instruments excluded. Effects validate on load.",juce::dontSendNotification);
+            current.setText(summary,juce::dontSendNotification);notify("AU discovery complete: "+summary);
+        }
     }
 };

@@ -424,7 +424,7 @@ void BassRackProcessor::showScanner() {
     WeakReference<BassRackProcessor> weak(this);
     auto* panel=new EffectScanPanel(formats,known,[weak](String text){
         if(weak!=nullptr){const ScopedLock lock(weak->graphLock);weak->message=text;}
-    });
+    },knownFile);
     auto* window=new PluginWindow("Bass Rack / Effects-only AU scan",panel);
     windows.add(window);scannerWindow=window;window->setAlwaysOnTop(true);window->toFront(true);
 }

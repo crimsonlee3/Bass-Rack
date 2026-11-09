@@ -263,7 +263,7 @@ void BassRackEditor::paint(Graphics& g) {
     g.drawText("Double-click to create a region. Drag nodes for frequency/level. Scroll over a node for Q. Drag its edges for width.",
         28,static_cast<int>(controls-28),getWidth()-56,20,Justification::centredLeft);
     g.setColour(Colour(0xff687276));g.setFont(font(9.5f,true));
-    g.drawText("LINEAR PHASE / STEREO ANALYSIS / 0.4.0",getWidth()-390,getHeight()-35,362,18,Justification::centredRight);
+    g.drawText("LINEAR PHASE / STEREO ANALYSIS / "+String(JucePlugin_VersionString),getWidth()-390,getHeight()-35,362,18,Justification::centredRight);
 }
 void BassRackEditor::resized() {
     const int w=getWidth(),c=getHeight()-426;
