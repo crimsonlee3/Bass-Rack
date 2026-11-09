@@ -1,0 +1,60 @@
+name: macOS AU build
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths-ignore:
+      - 'docs/previews/**'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  dsp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build -DBASSRACK_DSP_ONLY=ON -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build --parallel 2
+      - run: ctest --test-dir build --output-on-failure
+  audio-unit:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache/restore@v4
+        with:
+          path: build
+          key: bassrack-macos-universal-juce806-${{ runner.arch }}-${{ hashFiles('CMakeLists.txt') }}
+      - name: Configure universal AU
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release '-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64' -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+      - name: Build plugin and tests
+        run: cmake --build build --config Release --parallel 3
+      - name: DSP tests
+        run: ctest --test-dir build -C Release --output-on-failure
+      - uses: actions/cache/save@v4
+        with:
+          path: build
+          key: bassrack-macos-universal-juce806-${{ runner.arch }}-${{ hashFiles('CMakeLists.txt') }}
+      - name: Ad-hoc sign for local testing
+        run: codesign --force --deep --sign - "build/BassRack_artefacts/Release/AU/Bass Rack.component"
+      - name: Build PKG installer and DMG
+        run: bash scripts/package-macos.sh
+      - name: Verify actual installer payload and AU
+        run: |
+          package=$(find build/installers -maxdepth 1 -name '*.pkg' -print -quit)
+          test -n "$package"
+          sudo /usr/sbin/installer -pkg "$package" -target /
+          component="/Library/Audio/Plug-Ins/Components/Bass Rack.component"
+          test -f "$component/Contents/Info.plist"
+          codesign --verify --deep --strict "$component"
+          lipo "$component/Contents/MacOS/Bass Rack" -verify_arch arm64 x86_64
+          killall -9 AudioComponentRegistrar || true
+          sleep 3
+          auval -v aufx BsRk Crsn
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BassRack-macOS-Installers
+          path: |
+            build/installers/*.pkg
+            build/installers/*.dmg
+            build/installers/SHA256SUMS.txt
+          if-no-files-found: error

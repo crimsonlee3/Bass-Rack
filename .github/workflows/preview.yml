@@ -1,0 +1,45 @@
+name: Capture native plugin editor
+on:
+  pull_request:
+    paths:
+      - 'Source/**'
+      - 'tools/CaptureEditor.cpp'
+      - 'CMakeLists.txt'
+      - '.github/workflows/preview.yml'
+permissions:
+  contents: write
+jobs:
+  preview:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+      - uses: actions/cache/restore@v4
+        with:
+          path: build
+          key: bassrack-preview-${{ runner.arch }}-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: |
+            bassrack-macos-universal-juce806-${{ runner.arch }}-
+      - name: Build native editor capture tool
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release '-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64' -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DBASSRACK_BUILD_PREVIEW=ON
+          cmake --build build --target BassRackPreview --parallel 3
+      - name: Render real editor components
+        run: build/BassRackPreview_artefacts/Release/BassRackPreview "$GITHUB_WORKSPACE/docs/previews"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BassRack-Editor-Screenshots
+          path: docs/previews/*.png
+      - name: Save screenshots alongside source
+        env:
+          PREVIEW_BRANCH: ${{ github.head_ref }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/previews/*.png
+          if ! git diff --cached --quiet; then
+            git commit -m 'Capture native Bass Rack editor screenshots'
+            git push origin "HEAD:$PREVIEW_BRANCH"
+          fi

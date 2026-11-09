@@ -1,0 +1,71 @@
+#!/bin/bash
+set -euo pipefail
+
+# Run on macOS after building and signing the AU. No installer scripts run as root.
+component="${1:-build/BassRack_artefacts/Release/AU/Bass Rack.component}"
+output="${2:-build/installers}"
+version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$component/Contents/Info.plist")
+stage=$(mktemp -d)
+trap 'rm -rf "$stage"' EXIT
+
+destination="$stage/root/Library/Audio/Plug-Ins/Components"
+mkdir -p "$destination" "$output" "$stage/image"
+/usr/bin/ditto "$component" "$destination/Bass Rack.component"
+
+# Audio Unit .component bundles are not inferred consistently by pkgbuild.
+# Declare the exact bundle and disable relocation/version skipping explicitly.
+cat > "$stage/components.plist" <<'COMPONENTS'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><array><dict>
+<key>RootRelativeBundlePath</key><string>Library/Audio/Plug-Ins/Components/Bass Rack.component</string>
+<key>BundleIsRelocatable</key><false/>
+<key>BundleIsVersionChecked</key><false/>
+<key>BundleHasStrictIdentifier</key><true/>
+<key>BundleOverwriteAction</key><string>upgrade</string>
+</dict></array></plist>
+COMPONENTS
+
+name="BassRack-$version-macOS-universal"
+package="$output/$name.pkg"
+/usr/bin/pkgbuild \
+  --root "$stage/root" \
+  --component-plist "$stage/components.plist" \
+  --identifier audio.crimson.bassrack.installer \
+  --version "$version" \
+  --install-location / \
+  --ownership recommended \
+  "$package"
+
+/usr/sbin/pkgutil --payload-files "$package" > "$output/payload-files.txt"
+/usr/bin/grep -F 'Library/Audio/Plug-Ins/Components/Bass Rack.component/Contents/Info.plist' "$output/payload-files.txt"
+
+/usr/bin/ditto "$package" "$stage/image/$name.pkg"
+cat > "$stage/image/Install Bass Rack.txt" <<'INSTRUCTIONS'
+Bass Rack 0.5.2 - development build
+
+1. Quit Logic Pro.
+2. Double-click the BassRack .pkg installer and follow the Installer prompts.
+   It installs Bass Rack.component into /Library/Audio/Plug-Ins/Components
+   for all users. Administrator authorization is required.
+3. Reopen Logic. Find Audio Units > Crimson Audio > Bass Rack.
+   Start with the "808 - clean sub" factory settings.
+
+This development installer is unsigned and is not notarized by Apple.
+macOS may require explicit approval in System Settings > Privacy & Security.
+It is not a Developer ID signed public release.
+
+If you previously installed a copy manually in your user's
+~/Library/Audio/Plug-Ins/Components folder, remove that older Bass Rack.component
+before installing, so Logic does not see two copies.
+
+Uninstall: quit Logic and remove only
+/Library/Audio/Plug-Ins/Components/Bass Rack.component.
+Your saved presets and third-party plugins are not removed.
+INSTRUCTIONS
+
+/usr/bin/hdiutil create -volname "Bass Rack Installer" -srcfolder "$stage/image" \
+  -format UDZO -ov "$output/$name.dmg"
+/usr/bin/hdiutil verify "$output/$name.dmg"
+(cd "$output" && /usr/bin/shasum -a 256 "$name.pkg" "$name.dmg" > SHA256SUMS.txt)
+echo "Created $package and $output/$name.dmg"
